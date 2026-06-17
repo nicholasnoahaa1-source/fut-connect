@@ -1,0 +1,34 @@
+{
+  "summary": "Regression retest after fixes for (1) 422 on athlete save with empty numeric fields and (2) AI recommend hitting LLM budget. All 23 backend pytest tests PASS (28s, including both AI tests that previously failed/were-blocked). Direct curl confirms PUT /api/athlete/me now accepts age/height/weight='' (returns 200, coerced to None via field_validator). UI retest: AthleteView save-profile no longer 422s and no error overlay; AI analyze button renders real text (1543 chars) in [data-testid=ai-result]; CoachView ai-recommend-btn renders real top-3 (781 chars) in [data-testid=ai-rec-result]. Both critical issues from iteration_1 are CLOSED.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "startup hooks", "issue": "server.py still uses deprecated @app.on_event('startup'/'shutdown') — pre-existing, not a regression."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "App.js still 832 lines — split LoginView/AthleteView/CoachView/CvView/OppsView into separate files (carried over from iter 1).",
+    "server.py @app.on_event deprecated — migrate to FastAPI lifespan (carried over).",
+    "AthleteView.save() now wrapped in try/catch with toast on error — good fix. Empty-string numeric cleanup before send + Number-coerce is implemented correctly.",
+    "Pydantic field_validator(mode='before') on AthletePayload converts '' to None for age/height/weight — defensive double layer is appropriate.",
+    "AI prompts trimmed to top-5 candidates + short pt-BR format — produces compact responses well under the per-call LLM budget."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (23/23)", "frontend": "100% on tested flows (save-profile, AI analyze, AI recommend)"},
+  "test_credentials": "Cookie session_token from /tmp/ath_token.txt (atleta) and /tmp/test_token.txt (coach). Bearer Authorization also supported. Seed via mongosh per /app/memory/test_credentials.md.",
+  "seed_data_creation": "Used pre-existing /tmp tokens supplied by main agent; no new test users seeded. Demo athletes already present (Lucas Maré, Bia Armadora, Day Paralímpica, Rafa Veloz).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Both critical issues from iteration_1 are fixed and verified. Backend AI tests pass within ~28s total (Claude Sonnet 4.5 latency normal). Use /dashboard route for auth-gated entry; / always shows LoginView. Cookie name session_token; Bearer header also OK for API tests.",
+  "rca of the issue": "N/A — this iteration was a retest. Iter-1 RCA was correct and main agent applied both fixes precisely (frontend payload cleaning + backend Pydantic field_validator + shorter AI prompts capped at top-5)."
+}

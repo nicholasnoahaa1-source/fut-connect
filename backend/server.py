@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -88,6 +88,13 @@ class AthletePayload(BaseModel):
     photo: Optional[str] = None  # data URL or http
     videos: Optional[List[Dict[str, Any]]] = None  # [{id,title,url,pinned}]
     attrs: Optional[Dict[str, int]] = None  # vel,res,forc,ctrl,fin,pas,vis,dec,pos
+
+    @field_validator("age", "height", "weight", mode="before")
+    @classmethod
+    def _empty_str_to_none(cls, v):
+        if v == "" or v is None:
+            return None
+        return v
 
 
 class CoachPayload(BaseModel):
@@ -543,14 +550,12 @@ async def ai_analyze(p: AIAnalyzePayload, user=Depends(get_user_from_session)):
     profile = await db.athletes.find_one({"user_id": user["user_id"]}, {"_id": 0}) or {}
     sc = cat_scores(profile.get("attrs") or empty_attrs())
     prompt = (
-        f"Atleta: {profile.get('name','-')}, esporte: {profile.get('sport','Futebol')}, "
-        f"posição: {profile.get('position','-')}, idade: {profile.get('age','-')}, "
-        f"cidade: {profile.get('city','-')}. Notas (0-99): {profile.get('attrs', {})}. "
-        f"Geral {sc['overall']}, Físico {sc['fisico']}, Técnico {sc['tecnico']}, Mental {sc['mental']}. "
-        f"Bio: {profile.get('bio','')}. Foco do atleta: {p.focus or 'evoluir'}.\n\n"
-        "Em português brasileiro, dê: 1) 3 pontos fortes; 2) 3 pontos a melhorar; "
-        "3) plano de treino semanal objetivo (5 dias, blocos curtos); "
-        "4) dica de como destacar isso no perfil/vídeo. Use linguagem direta de treinador."
+        f"Atleta: {profile.get('name','-')}, {profile.get('sport','Futebol')}, "
+        f"{profile.get('position','-')}, {profile.get('age','-')} anos, "
+        f"{profile.get('city','-')}. Geral {sc['overall']} (F{sc['fisico']}/T{sc['tecnico']}/M{sc['mental']}). "
+        f"Foco: {p.focus or 'evoluir'}.\n\n"
+        "Em pt-BR breve: 1) 3 pontos fortes; 2) 3 a melhorar; 3) plano semanal (5 dias, frases curtas); "
+        "4) dica de vídeo/perfil."
     )
     text = await llm_chat(
         "Você é um treinador esportivo experiente que dá conselhos práticos e motivadores em pt-BR.",
@@ -571,21 +576,20 @@ async def ai_recommend(p: AIRecommendPayload, user=Depends(get_user_from_session
     for r in rows:
         r["scores"] = cat_scores(r.get("attrs") or empty_attrs())
     rows.sort(key=lambda x: x["scores"]["overall"], reverse=True)
-    top = rows[:8]
+    top = rows[:5]
     summary = "\n".join(
         [
             f"- {r.get('name')} | {r.get('position','-')} | {r.get('city','-')} | "
-            f"Geral {r['scores']['overall']} (F{r['scores']['fisico']}/T{r['scores']['tecnico']}/M{r['scores']['mental']}) "
-            f"| {'verificado' if r.get('verified') else 'auto-avaliação'}"
+            f"Geral {r['scores']['overall']} F{r['scores']['fisico']}/T{r['scores']['tecnico']}/M{r['scores']['mental']} "
+            f"{'✓' if r.get('verified') else '⏳'}"
             for r in top
         ]
     )
     prompt = (
-        f"Sou técnico do clube '{coach.get('club','-')}' em {coach.get('city','-')}, "
-        f"esporte {sport}, categoria {coach.get('category','-')}. "
-        f"Busco: posição '{p.position or 'qualquer'}'. Observações: {p.notes or '-'}.\n\n"
-        f"Lista de atletas candidatos:\n{summary or '(sem candidatos)'}\n\n"
-        "Em pt-BR, monte um TOP 3 com nome, justificativa curta e 1 pergunta-chave pra fazer no contato."
+        f"Técnico em {coach.get('city','-')}, esporte {sport}, categoria {coach.get('category','-')}. "
+        f"Busca posição '{p.position or 'qualquer'}'. Notas: {p.notes or '-'}.\n"
+        f"Candidatos:\n{summary or '(vazio)'}\n\n"
+        "Em pt-BR, monte TOP 3 com nome, justificativa breve (1 frase) e 1 pergunta-chave."
     )
     text = await llm_chat(
         "Você é um olheiro/scout esportivo que indica atletas com base em dados objetivos, em pt-BR direto.",

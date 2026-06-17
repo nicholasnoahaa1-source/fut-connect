@@ -197,10 +197,19 @@ function AthleteView({ user, toast, onOpenCv }) {
   const delVideo = (id) => setP({ ...p, videos: p.videos.filter(x => x.id !== id) });
 
   const save = async () => {
-    const { data } = await api.put("/athlete/me", p);
-    setP({ ...p, scores: data.scores, verified: data.verified });
-    toast("Perfil salvo! ⚽");
-    load();
+    const clean = { ...p };
+    ["age", "height", "weight"].forEach(k => {
+      if (clean[k] === "" || clean[k] === null || clean[k] === undefined) delete clean[k];
+      else clean[k] = Number(clean[k]);
+    });
+    try {
+      const { data } = await api.put("/athlete/me", clean);
+      setP({ ...p, scores: data.scores, verified: data.verified });
+      toast("Perfil salvo! ⚽");
+      load();
+    } catch (e) {
+      toast("Erro ao salvar perfil");
+    }
   };
 
   const onPhoto = (e) => {
