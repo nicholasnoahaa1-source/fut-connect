@@ -5,17 +5,26 @@ REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS B
 import os
 import uuid
 import logging
+import smtplib
+import secrets
+import hashlib
+import time
+import random
+from email.message import EmailMessage
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
 
 import httpx
+import bcrypt
+import cloudinary
+import cloudinary.utils
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, Cookie, Header
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, EmailStr
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -38,6 +47,57 @@ def now_utc() -> datetime:
 
 def gen_id(prefix: str = "id") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+# Cloudinary config
+cloudinary.config(
+    cloud_name=os.environ.get("CLOUDINARY_CLOUD_NAME", ""),
+    api_key=os.environ.get("CLOUDINARY_API_KEY", ""),
+    api_secret=os.environ.get("CLOUDINARY_API_SECRET", ""),
+    secure=True,
+)
+
+
+# ---------- Email (Gmail SMTP) ----------
+def send_email(to_email: str, subject: str, html_body: str, text_body: str) -> bool:
+    user = os.environ.get("GMAIL_USER", "").strip()
+    pwd = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "").strip()
+    from_name = os.environ.get("EMAIL_FROM_NAME", "Fut Connect")
+    if not user or not pwd:
+        logger.warning("Gmail SMTP not configured; email NOT sent to %s", to_email)
+        return False
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = f"{from_name} <{user}>"
+        msg["To"] = to_email
+        msg.set_content(text_body)
+        msg.add_alternative(html_body, subtype="html")
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as s:
+            s.starttls()
+            s.login(user, pwd)
+            s.send_message(msg)
+        logger.info("Sent email to %s | subject=%s", to_email, subject)
+        return True
+    except Exception as e:
+        logger.exception("Email send failed: %s", e)
+        return False
+
+
+def code_email_html(code: str, action: str = "confirmar tua conta") -> tuple[str, str]:
+    text = f"Teu codigo Fut Connect: {code}\n\nUse pra {action}. Expira em 10 minutos."
+    html = f"""
+    <div style="font-family:Manrope,system-ui,sans-serif;background:#0c0b09;color:#f4eee2;padding:32px;border-radius:18px;max-width:480px;margin:auto">
+      <div style="font-family:'Anton',sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#ffc23d;font-size:24px">FUT CONNECT</div>
+      <h2 style="font-family:'Anton',sans-serif;font-weight:400;letter-spacing:.05em;text-transform:uppercase;color:#fff;margin-top:24px">Teu codigo</h2>
+      <p style="color:#b7af9d">Use o codigo abaixo pra {action}:</p>
+      <div style="font-family:'Courier New',monospace;font-size:36px;letter-spacing:12px;background:rgba(255,194,61,.13);border:1px solid rgba(255,194,61,.4);color:#ffc23d;border-radius:12px;padding:18px;text-align:center;margin:18px 0;font-weight:700">{code}</div>
+      <p style="color:#776f60;font-size:13px">Expira em 10 minutos. Se voce nao pediu isso, ignore este e-mail.</p>
+    </div>
+    """
+    return html, text
+
+
 
 
 async def get_user_from_session(
@@ -68,6 +128,33 @@ async def get_user_from_session(
 # ---------- Models ----------
 class SessionExchange(BaseModel):
     session_id: str
+
+
+class SignupPayload(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+    role: Optional[str] = None  # "atleta" | "tecnico"
+
+
+class VerifyPayload(BaseModel):
+    email: EmailStr
+    code: str
+
+
+class LoginPayload(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class ForgotPayload(BaseModel):
+    email: EmailStr
+
+
+class ResetPayload(BaseModel):
+    email: EmailStr
+    code: str
+    new_password: str
 
 
 class RolePick(BaseModel):
@@ -151,10 +238,196 @@ class AIAnalyzePayload(BaseModel):
     focus: Optional[str] = None  # ex: "atacante explosivo"
 
 
+# ---------- Auth helpers (email/password) ----------
+def hash_password(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(pw: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(pw.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def gen_code() -> str:
+    return f"{random.randint(0, 999999):06d}"
+
+
+async def create_session_for_user(user_id: str, response: Response) -> str:
+    token = secrets.token_urlsafe(32)
+    expires = now_utc() + timedelta(days=7)
+    await db.user_sessions.insert_one(
+        {
+            "user_id": user_id,
+            "session_token": token,
+            "expires_at": expires.isoformat(),
+            "created_at": now_utc().isoformat(),
+        }
+    )
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        max_age=7 * 24 * 60 * 60,
+        path="/",
+        httponly=True,
+        secure=True,
+        samesite="none",
+    )
+    return token
+
+
 # ---------- Auth ----------
 @api.get("/")
 async def root():
     return {"app": "Fut Connect", "ok": True}
+
+
+@api.post("/auth/signup")
+async def auth_signup(payload: SignupPayload):
+    email = payload.email.lower().strip()
+    if len(payload.password) < 6:
+        raise HTTPException(400, "Senha precisa ter no mínimo 6 caracteres")
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if existing and existing.get("password_hash"):
+        raise HTTPException(400, "Esse e-mail já tem conta. Faça login.")
+    code = gen_code()
+    expires = now_utc() + timedelta(minutes=10)
+    await db.email_codes.update_one(
+        {"email": email, "purpose": "verify"},
+        {"$set": {
+            "email": email, "purpose": "verify", "code": code,
+            "expires_at": expires.isoformat(),
+            "pending_name": payload.name,
+            "pending_password_hash": hash_password(payload.password),
+            "pending_role": payload.role,
+            "created_at": now_utc().isoformat(),
+        }},
+        upsert=True,
+    )
+    html, text = code_email_html(code, "confirmar tua conta")
+    sent = send_email(email, "Teu código Fut Connect", html, text)
+    return {"ok": True, "email": email, "email_sent": sent}
+
+
+@api.post("/auth/verify")
+async def auth_verify(payload: VerifyPayload, response: Response):
+    email = payload.email.lower().strip()
+    row = await db.email_codes.find_one({"email": email, "purpose": "verify"}, {"_id": 0})
+    if not row:
+        raise HTTPException(400, "Código não encontrado. Cadastra de novo.")
+    exp = datetime.fromisoformat(row["expires_at"])
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp < now_utc():
+        raise HTTPException(400, "Código expirou. Pede outro.")
+    if row["code"] != payload.code.strip():
+        raise HTTPException(400, "Código incorreto.")
+    # create user
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user:
+        user_id = gen_id("user")
+        await db.users.insert_one({
+            "user_id": user_id,
+            "email": email,
+            "name": row.get("pending_name") or email.split("@")[0],
+            "picture": "",
+            "role": row.get("pending_role"),
+            "password_hash": row.get("pending_password_hash"),
+            "verified": True,
+            "created_at": now_utc().isoformat(),
+        })
+    else:
+        user_id = user["user_id"]
+        await db.users.update_one({"user_id": user_id}, {"$set": {
+            "password_hash": row.get("pending_password_hash") or user.get("password_hash"),
+            "verified": True,
+            "name": row.get("pending_name") or user.get("name"),
+            "role": row.get("pending_role") or user.get("role"),
+        }})
+    await db.email_codes.delete_one({"email": email, "purpose": "verify"})
+    await create_session_for_user(user_id, response)
+    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+    return {"user": user_doc, "ok": True}
+
+
+@api.post("/auth/login")
+async def auth_login(payload: LoginPayload, response: Response):
+    email = payload.email.lower().strip()
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user or not user.get("password_hash"):
+        raise HTTPException(401, "E-mail ou senha inválidos")
+    if not verify_password(payload.password, user["password_hash"]):
+        raise HTTPException(401, "E-mail ou senha inválidos")
+    if not user.get("verified"):
+        raise HTTPException(403, "Confirma teu e-mail primeiro")
+    await create_session_for_user(user["user_id"], response)
+    user_doc = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0, "password_hash": 0})
+    return {"user": user_doc, "ok": True}
+
+
+@api.post("/auth/resend-code")
+async def auth_resend(payload: ForgotPayload):
+    email = payload.email.lower().strip()
+    row = await db.email_codes.find_one({"email": email, "purpose": "verify"}, {"_id": 0})
+    if not row:
+        raise HTTPException(400, "Não há cadastro pendente. Faz signup de novo.")
+    code = gen_code()
+    expires = now_utc() + timedelta(minutes=10)
+    await db.email_codes.update_one(
+        {"email": email, "purpose": "verify"},
+        {"$set": {"code": code, "expires_at": expires.isoformat()}},
+    )
+    html, text = code_email_html(code, "confirmar tua conta")
+    sent = send_email(email, "Teu código Fut Connect", html, text)
+    return {"ok": True, "email_sent": sent}
+
+
+@api.post("/auth/forgot-password")
+async def auth_forgot(payload: ForgotPayload):
+    email = payload.email.lower().strip()
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    # Always return ok to avoid email enumeration
+    if not user or not user.get("password_hash"):
+        return {"ok": True, "email_sent": False}
+    code = gen_code()
+    expires = now_utc() + timedelta(minutes=10)
+    await db.email_codes.update_one(
+        {"email": email, "purpose": "reset"},
+        {"$set": {"email": email, "purpose": "reset", "code": code,
+                  "expires_at": expires.isoformat(), "created_at": now_utc().isoformat()}},
+        upsert=True,
+    )
+    html, text = code_email_html(code, "recuperar tua senha")
+    sent = send_email(email, "Recuperar senha — Fut Connect", html, text)
+    return {"ok": True, "email_sent": sent}
+
+
+@api.post("/auth/reset-password")
+async def auth_reset(payload: ResetPayload, response: Response):
+    email = payload.email.lower().strip()
+    if len(payload.new_password) < 6:
+        raise HTTPException(400, "Senha precisa ter no mínimo 6 caracteres")
+    row = await db.email_codes.find_one({"email": email, "purpose": "reset"}, {"_id": 0})
+    if not row:
+        raise HTTPException(400, "Código não encontrado")
+    exp = datetime.fromisoformat(row["expires_at"])
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp < now_utc():
+        raise HTTPException(400, "Código expirou")
+    if row["code"] != payload.code.strip():
+        raise HTTPException(400, "Código incorreto")
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user:
+        raise HTTPException(404, "Usuário não encontrado")
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"password_hash": hash_password(payload.new_password), "verified": True}},
+    )
+    await db.email_codes.delete_one({"email": email, "purpose": "reset"})
+    await create_session_for_user(user["user_id"], response)
+    return {"ok": True}
 
 
 @api.post("/auth/session")
@@ -223,6 +496,7 @@ async def auth_session(payload: SessionExchange, response: Response):
 
 @api.get("/auth/me")
 async def me(user=Depends(get_user_from_session)):
+    user.pop("password_hash", None)
     return user
 
 
@@ -239,6 +513,31 @@ async def set_role(payload: RolePick, user=Depends(get_user_from_session)):
         raise HTTPException(status_code=400, detail="Função inválida")
     await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"role": payload.role}})
     return {"ok": True, "role": payload.role}
+
+
+# ---------- Cloudinary signed upload ----------
+@api.post("/upload/sign")
+async def upload_sign(user=Depends(get_user_from_session)):
+    """Return signed Cloudinary params so frontend can upload directly.
+    Frontend then POSTs the file + these params to
+    https://api.cloudinary.com/v1_1/{cloud_name}/auto/upload
+    """
+    cloud = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
+    api_key = os.environ.get("CLOUDINARY_API_KEY", "")
+    api_secret = os.environ.get("CLOUDINARY_API_SECRET", "")
+    if not (cloud and api_key and api_secret):
+        raise HTTPException(500, "Cloudinary não configurado")
+    ts = int(time.time())
+    folder = f"futconnect/{user['user_id']}"
+    params_to_sign = {"timestamp": ts, "folder": folder}
+    signature = cloudinary.utils.api_sign_request(params_to_sign, api_secret)
+    return {
+        "cloud_name": cloud,
+        "api_key": api_key,
+        "timestamp": ts,
+        "folder": folder,
+        "signature": signature,
+    }
 
 
 # ---------- Attributes / scoring ----------

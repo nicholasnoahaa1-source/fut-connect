@@ -33,9 +33,11 @@ const emptyAttrs = () => Object.fromEntries(ALL_KEYS.map(k => [k, 70]));
 function embedUrl(url) {
   if (!url) return null;
   const yt = url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([\w-]{6,})/);
-  if (yt) return `https://www.youtube.com/embed/${yt[1]}`;
+  if (yt) return { type: "iframe", src: `https://www.youtube.com/embed/${yt[1]}` };
   const dr = url.match(/drive\.google\.com\/file\/d\/([\w-]+)/);
-  if (dr) return `https://drive.google.com/file/d/${dr[1]}/preview`;
+  if (dr) return { type: "iframe", src: `https://drive.google.com/file/d/${dr[1]}/preview` };
+  // Direct video file (Cloudinary etc.)
+  if (/\.(mp4|webm|mov|m4v|ogg)(\?|$)/i.test(url) || url.includes("res.cloudinary.com")) return { type: "video", src: url };
   return null;
 }
 
@@ -78,25 +80,177 @@ function Topbar({ user, onLogout, onGoOpps }) {
   );
 }
 
-// ===== Login =====
-function LoginView() {
+// ===== Login (tabs: Google + Email) =====
+function LoginView({ toast, onSignedIn, onNeedVerify }) {
+  const [tab, setTab] = useState("login"); // login | signup
+  const [form, setForm] = useState({ name: "", email: "", password: "", role: "atleta" });
+  const [busy, setBusy] = useState(false);
+  const [forgot, setForgot] = useState(false);
+  const [forgotStep, setForgotStep] = useState(1);
+  const [forgotData, setForgotData] = useState({ email: "", code: "", new_password: "" });
+
   const goGoogle = () => {
     // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
     const redirectUrl = window.location.origin + "/dashboard";
     window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
   };
+
+  const doSignup = async () => {
+    if (!form.name.trim() || !form.email.trim() || form.password.length < 6) {
+      toast("Preenche nome, e-mail e senha (mín 6)"); return;
+    }
+    setBusy(true);
+    try {
+      await api.post("/auth/signup", form);
+      toast("Código enviado! Confere teu e-mail 📧");
+      onNeedVerify(form.email);
+    } catch (e) {
+      toast(e.response?.data?.detail || "Erro no cadastro");
+    }
+    setBusy(false);
+  };
+
+  const doLogin = async () => {
+    setBusy(true);
+    try {
+      const { data } = await api.post("/auth/login", { email: form.email, password: form.password });
+      onSignedIn(data.user);
+    } catch (e) {
+      const msg = e.response?.data?.detail || "Erro no login";
+      if (e.response?.status === 403) {
+        toast("Confirma teu e-mail primeiro 📧");
+        onNeedVerify(form.email);
+      } else {
+        toast(msg);
+      }
+    }
+    setBusy(false);
+  };
+
+  const doForgot = async () => {
+    setBusy(true);
+    try {
+      if (forgotStep === 1) {
+        await api.post("/auth/forgot-password", { email: forgotData.email });
+        toast("Se o e-mail existir, mandamos um código");
+        setForgotStep(2);
+      } else {
+        await api.post("/auth/reset-password", forgotData);
+        toast("Senha trocada! Já tá logado 🔓");
+        const { data } = await api.get("/auth/me");
+        onSignedIn(data);
+      }
+    } catch (e) {
+      toast(e.response?.data?.detail || "Erro");
+    }
+    setBusy(false);
+  };
+
+  if (forgot) {
+    return (
+      <div className="shell">
+        <div className="card-auth">
+          <h1 className="display">Recuperar senha</h1>
+          <p className="sub">{forgotStep === 1 ? "Coloca teu e-mail. Mandamos um código." : "Digite o código + nova senha."}</p>
+          {forgotStep === 1 ? (
+            <div className="field"><label>E-mail</label><input type="email" value={forgotData.email} onChange={e => setForgotData({ ...forgotData, email: e.target.value })} data-testid="forgot-email-input" /></div>
+          ) : (
+            <>
+              <div className="field"><label>Código (6 dígitos)</label><input type="text" value={forgotData.code} onChange={e => setForgotData({ ...forgotData, code: e.target.value })} maxLength={6} data-testid="forgot-code-input" /></div>
+              <div className="field"><label>Nova senha</label><input type="password" value={forgotData.new_password} onChange={e => setForgotData({ ...forgotData, new_password: e.target.value })} data-testid="forgot-newpass-input" /></div>
+            </>
+          )}
+          <button className="btn btn-gold btn-block" onClick={doForgot} disabled={busy} data-testid="forgot-submit-btn">{busy ? "..." : (forgotStep === 1 ? "Enviar código" : "Trocar senha")}</button>
+          <p style={{ textAlign: "center", marginTop: ".7rem" }}><span className="link" onClick={() => { setForgot(false); setForgotStep(1); }}>← Voltar</span></p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="shell">
       <div className="card-auth">
         <div style={{ fontFamily: "'Space Mono', monospace", fontSize: ".7rem", letterSpacing: ".2em", textTransform: "uppercase", color: "var(--gold)" }}>Plataforma de talentos</div>
         <h1 className="display">Entra na Fut Connect</h1>
         <p className="sub">Atletas mostram o talento. Técnicos acham o jogador certo.</p>
+
         <button className="btn btn-gold btn-block" onClick={goGoogle} data-testid="google-login-btn" style={{ marginBottom: ".8rem" }}>
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21.35 11.1H12v2.9h5.35c-.23 1.24-1.48 3.65-5.35 3.65-3.22 0-5.85-2.66-5.85-5.95s2.63-5.95 5.85-5.95c1.84 0 3.06.78 3.77 1.45l2.57-2.48C16.86 3.27 14.66 2.2 12 2.2 6.96 2.2 2.85 6.31 2.85 11.7c0 5.39 4.11 9.5 9.15 9.5 5.28 0 8.78-3.71 8.78-8.93 0-.6-.07-1.05-.13-1.17z"/></svg>
           Entrar com Google
         </button>
-        <p style={{ fontSize: ".8rem", color: "var(--text-faint)", textAlign: "center", marginTop: ".5rem" }}>
-          Autenticação segura via Google. Em 7 dias você ainda fica logado.
+
+        <div style={{ display: "flex", alignItems: "center", gap: ".7rem", margin: "1.2rem 0", color: "var(--text-faint)", fontSize: ".75rem" }}>
+          <div style={{ flex: 1, height: 1, background: "var(--line)" }}></div>OU<div style={{ flex: 1, height: 1, background: "var(--line)" }}></div>
+        </div>
+
+        <div className="auth-tabs" style={{ display: "flex", gap: ".4rem", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: "100px", padding: ".3rem", marginBottom: "1.2rem" }}>
+          <button className={`tab-btn ${tab === "login" ? "active" : ""}`} onClick={() => setTab("login")} data-testid="login-tab" style={tabStyle(tab === "login")}>Entrar</button>
+          <button className={`tab-btn ${tab === "signup" ? "active" : ""}`} onClick={() => setTab("signup")} data-testid="signup-tab" style={tabStyle(tab === "signup")}>Criar conta</button>
+        </div>
+
+        {tab === "signup" && (
+          <>
+            <div className="field"><label>Nome</label><input type="text" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Lucas Silva" data-testid="signup-name-input" /></div>
+            <div className="role-pick" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".5rem", marginBottom: ".95rem" }}>
+              <button className={`role-opt ${form.role === "atleta" ? "sel" : ""}`} onClick={() => setForm({ ...form, role: "atleta" })} data-testid="signup-role-atleta" type="button"><b>Sou atleta</b><small>Busco oportunidades</small></button>
+              <button className={`role-opt ${form.role === "tecnico" ? "sel" : ""}`} onClick={() => setForm({ ...form, role: "tecnico" })} data-testid="signup-role-tecnico" type="button"><b>Sou técnico</b><small>Busco jogadores</small></button>
+            </div>
+          </>
+        )}
+        <div className="field"><label>E-mail</label><input type="email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} placeholder="voce@email.com" data-testid="email-input" /></div>
+        <div className="field"><label>Senha</label><input type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} placeholder="••••••••" data-testid="password-input" /></div>
+        {tab === "login" ? (
+          <button className="btn btn-gold btn-block" onClick={doLogin} disabled={busy} data-testid="login-submit-btn">{busy ? "..." : "Entrar"}</button>
+        ) : (
+          <button className="btn btn-gold btn-block" onClick={doSignup} disabled={busy} data-testid="signup-submit-btn">{busy ? "..." : "Criar conta"}</button>
+        )}
+        <p style={{ textAlign: "center", marginTop: ".7rem", fontSize: ".82rem" }}>
+          <span className="link" onClick={() => setForgot(true)} data-testid="forgot-link">Esqueci minha senha</span>
+        </p>
+      </div>
+    </div>
+  );
+}
+function tabStyle(active) {
+  return {
+    flex: 1, padding: ".55rem", borderRadius: "100px",
+    fontWeight: 700, fontSize: ".85rem",
+    background: active ? "var(--gold)" : "transparent",
+    color: active ? "#1a1205" : "var(--text-dim)",
+    cursor: "pointer", border: "none",
+  };
+}
+
+// ===== Verify code =====
+function VerifyView({ email, onVerified, toast, onBack }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (code.length !== 6) { toast("Código de 6 dígitos"); return; }
+    setBusy(true);
+    try {
+      const { data } = await api.post("/auth/verify", { email, code });
+      onVerified(data.user);
+    } catch (e) {
+      toast(e.response?.data?.detail || "Erro");
+    }
+    setBusy(false);
+  };
+  const resend = async () => {
+    try { await api.post("/auth/resend-code", { email }); toast("Código reenviado"); }
+    catch (e) { toast(e.response?.data?.detail || "Erro"); }
+  };
+  return (
+    <div className="shell">
+      <div className="card-auth">
+        <h1 className="display">Confirma teu e-mail</h1>
+        <p className="sub">Mandamos um código de 6 dígitos pra <b style={{ color: "var(--gold)" }}>{email}</b>. Procura na caixa de entrada (ou spam).</p>
+        <div className="field"><label>Código</label>
+          <input type="text" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} maxLength={6} className="code-input" style={{ textAlign: "center", fontFamily: "'Space Mono',monospace", fontSize: "1.5rem", letterSpacing: ".4em" }} placeholder="------" data-testid="verify-code-input" />
+        </div>
+        <button className="btn btn-gold btn-block" onClick={submit} disabled={busy} data-testid="verify-submit-btn">{busy ? "..." : "Confirmar"}</button>
+        <p style={{ textAlign: "center", marginTop: ".8rem", fontSize: ".82rem" }}>
+          <span className="link" onClick={resend} data-testid="resend-code-btn">Reenviar código</span> · <span className="link" onClick={onBack}>← Voltar</span>
         </p>
       </div>
     </div>
@@ -193,6 +347,30 @@ function AthleteView({ user, toast, onOpenCv }) {
     setP({ ...p, videos: [...p.videos, newV] });
     setVTitle(""); setVUrl("");
   };
+
+  const uploadVideoFile = async (file) => {
+    if (!file) return;
+    if (file.size > 100_000_000) { toast("Vídeo muito grande (máx 100MB)"); return; }
+    toast("Enviando vídeo… aguarda");
+    try {
+      const { data: sig } = await api.post("/upload/sign");
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("api_key", sig.api_key);
+      fd.append("timestamp", sig.timestamp);
+      fd.append("folder", sig.folder);
+      fd.append("signature", sig.signature);
+      const res = await fetch(`https://api.cloudinary.com/v1_1/${sig.cloud_name}/auto/upload`, { method: "POST", body: fd });
+      const out = await res.json();
+      if (!out.secure_url) throw new Error(out.error?.message || "Falha no upload");
+      const newV = { id: "v" + Date.now(), title: vTitle || file.name, url: out.secure_url, pinned: p.videos.length === 0, cloudinary: true };
+      setP({ ...p, videos: [...p.videos, newV] });
+      setVTitle("");
+      toast("Vídeo enviado! 🎥");
+    } catch (e) {
+      toast("Erro no upload do vídeo");
+    }
+  };
   const pinVideo = (id) => setP({ ...p, videos: p.videos.map(x => ({ ...x, pinned: x.id === id })) });
   const delVideo = (id) => setP({ ...p, videos: p.videos.filter(x => x.id !== id) });
 
@@ -231,7 +409,6 @@ function AthleteView({ user, toast, onOpenCv }) {
 
   const pinnedVid = p.videos.find(v => v.pinned) || p.videos[0];
   const pinnedEmbed = pinnedVid ? embedUrl(pinnedVid.url) : null;
-
   return (
     <div className="app">
       <div className="dash-head">
@@ -296,6 +473,14 @@ function AthleteView({ user, toast, onOpenCv }) {
               <button className="btn btn-gold btn-sm" onClick={addVideo} data-testid="add-video-btn" style={{ height: "fit-content" }}>+ Adicionar</button>
             </div>
             <div className="field" style={{ marginTop: ".7rem" }}><label>Link (YouTube ou Drive)</label><input type="url" value={vUrl} onChange={e => setVUrl(e.target.value)} placeholder="https://youtube.com/watch?v=..." data-testid="video-url-input" /></div>
+            <div style={{ display: "flex", alignItems: "center", gap: ".7rem", margin: ".4rem 0 .7rem", color: "var(--text-faint)", fontSize: ".75rem" }}>
+              <div style={{ flex: 1, height: 1, background: "var(--line)" }}></div>OU FAÇA UPLOAD<div style={{ flex: 1, height: 1, background: "var(--line)" }}></div>
+            </div>
+            <label className="btn btn-azure btn-block" data-testid="video-upload-btn" style={{ cursor: "pointer" }}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+              📹 Enviar vídeo (até 100MB)
+              <input type="file" accept="video/*" hidden onChange={e => uploadVideoFile(e.target.files?.[0])} />
+            </label>
             <div className="vid-list">
               {p.videos.map(v => (
                 <div className="vid-item" key={v.id}>
@@ -336,7 +521,9 @@ function AthleteView({ user, toast, onOpenCv }) {
             </div>
             <div className="vid">
               {pinnedEmbed
-                ? <iframe src={pinnedEmbed} title="lance" allowFullScreen></iframe>
+                ? (pinnedEmbed.type === "video"
+                    ? <video src={pinnedEmbed.src} controls style={{ width: "100%", height: "100%", objectFit: "cover", position: "absolute", inset: 0 }} />
+                    : <iframe src={pinnedEmbed.src} title="lance" allowFullScreen></iframe>)
                 : <div className="hint">Adiciona um vídeo pra ele aparecer aqui 🎥</div>}
               <span className="ovr"><b>{scores.overall}</b><small>GERAL</small></span>
             </div>
@@ -617,7 +804,11 @@ function CvView({ athleteId, viewer, toast, onBack }) {
       <div className="cv-grid">
         <div>
           <div className="vid" style={{ borderRadius: "var(--radius)", border: "1px solid var(--line-strong)" }}>
-            {pinnedEmbed ? <iframe src={pinnedEmbed} title="lance" allowFullScreen></iframe> : <div className="hint">Sem vídeo ainda</div>}
+            {pinnedEmbed
+              ? (pinnedEmbed.type === "video"
+                  ? <video src={pinnedEmbed.src} controls style={{ width: "100%", height: "100%", objectFit: "cover", position: "absolute", inset: 0 }} />
+                  : <iframe src={pinnedEmbed.src} title="lance" allowFullScreen></iframe>)
+              : <div className="hint">Sem vídeo ainda</div>}
           </div>
           <div className="panel" style={{ marginTop: "1.2rem" }}>
             <div className="panel-title" style={{ fontSize: "1rem" }}>Estatísticas</div>
@@ -793,7 +984,7 @@ function Dashboard() {
   const backHome = () => { setPage("home"); window.scrollTo(0, 0); };
 
   if (loading) return <div className="shell"><div className="card-auth"><h1 className="display">Carregando…</h1></div></div>;
-  if (!user) return <LoginView />;
+  if (!user) return <Landing />;
   if (!user.role) return (<><Topbar user={user} onLogout={logout} onGoOpps={openOpps} /><RolePick onPick={pickRole} /></>);
 
   return (
@@ -809,7 +1000,13 @@ function Dashboard() {
 
 // ===== Landing (logged-out) =====
 function Landing() {
-  return (<><Topbar /><LoginView /></>);
+  const navigate = useNavigate();
+  const toast = React.useContext(ToastCtx);
+  const [needVerifyEmail, setNeedVerifyEmail] = useState(null);
+  if (needVerifyEmail) {
+    return (<><Topbar /><VerifyView email={needVerifyEmail} toast={toast} onBack={() => setNeedVerifyEmail(null)} onVerified={(u) => navigate("/dashboard", { state: { user: u } })} /></>);
+  }
+  return (<><Topbar /><LoginView toast={toast} onSignedIn={(u) => navigate("/dashboard", { state: { user: u } })} onNeedVerify={(em) => setNeedVerifyEmail(em)} /></>);
 }
 
 // ===== Router =====
