@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 3 testing — email/password auth (signup + 6-digit verify), forgot/reset password, resend, login, Cloudinary signed upload, and full regression. All 38 backend pytest tests PASS (23 regression + 15 new iter-3). Frontend E2E verified via Playwright: signup → VerifyView → enter code (read from db.email_codes) → /dashboard; logout → login → /dashboard; forgot-link → email step → code+new-password → auto-logged-in /dashboard; video-upload-btn and save-profile-btn present on AthleteView. Gmail SMTP rejects credentials (BadCredentials 535-5.7.8) so signup returns email_sent:false but code is still stored in email_codes and the entire verify flow works — this matches the user-provided context note (credentials issue, not a code bug).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auth/signup", "issue": "email_sent:false because GMAIL_APP_PASSWORD in /app/backend/.env is rejected by Google (535 BadCredentials). Per user note: regenerate app password — NOT a code bug. Flow works end-to-end since code is persisted in db.email_codes."},
+      {"endpoint": "server.py startup hooks", "issue": "still uses deprecated @app.on_event('startup'/'shutdown') — pre-existing from iter 1/2."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter3_auth_upload.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/iter3_results.xml",
+    "/app/test_reports/pytest/regression_results.xml"
+  ],
+  "action_items": [
+    "User to regenerate Gmail app password and update GMAIL_APP_PASSWORD in /app/backend/.env so verification emails actually deliver (currently codes only readable via Mongo).",
+    "Optional (carry-over): migrate @app.on_event to FastAPI lifespan; split App.js (>800 LOC) into per-view files."
+  ],
+  "critical_code_review_comments": [
+    "Note: review_request specified data-testid 'signup-email-input'/'signup-password-input', but actual App.js (lines 200-201) uses shared 'email-input'/'password-input' for both login and signup. This works because the same form fields are reused per active tab; tests pass with the shared testids. If a stricter naming convention is desired, rename for clarity in test docs.",
+    "auth_signup correctly stores pending_password_hash + pending_role in email_codes without creating a users row until verify — good (prevents zombie unverified users polluting the search/users collections).",
+    "auth_forgot returns ok:true even when user does not exist — proper email-enumeration mitigation.",
+    "upload/sign correctly scopes folder per user_id ('futconnect/{user_id}'), uses cloudinary.utils.api_sign_request (timestamp + folder signed), and returns required Cloudinary direct-upload params.",
+    "session_token cookie set with secure=True, samesite='none', httponly=True, max_age 7 days — appropriate for cross-site preview env.",
+    "bcrypt hash format is $2b$ via bcrypt.gensalt() — correct.",
+    "Pydantic EmailStr used on all auth payloads — invalid emails 422 before reaching DB.",
+    "code expiry honored on both /verify and /reset-password (10-minute window); expired test passes."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter3_auth_upload.py (new — 15 pytest cases for signup/verify/login/forgot/reset/resend/upload-sign)"
+  ],
+  "success_rate": {"backend": "100% (38/38 — 23 regression + 15 iter3)", "frontend": "100% on tested flows (signup, verify, login, forgot/reset, athlete dashboard, video upload button present)"},
+  "test_credentials": "Email/password test users are created on-the-fly per test (TEST_<uuid>@example.com / secret123). Codes read directly from db.email_codes via mongosh. Existing cookie-based fixtures (atleta.test, coach.test) from /app/memory/test_credentials.md still valid for regression suite.",
+  "seed_data_creation": "Each iter-3 test creates and cleans up its own email_codes/users rows. Demo athletes (Lucas Maré, Bia Armadora, Day Paralímpica, Rafa Veloz) still present from startup seed.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Email delivery is broken (Gmail BadCredentials) — to verify signup/forgot codes, ALWAYS read from MongoDB: db.email_codes.findOne({email:'...', purpose:'verify'|'reset'}).code . Frontend signup uses shared 'email-input'/'password-input' testids, not 'signup-email-input'. After /verify or /reset-password, backend sets session_token cookie and frontend navigates to /dashboard automatically. All AI tests work within ~30s.",
+  "rca of the issue": "N/A — no new bugs found. The email_sent:false signal is correctly propagated from the SMTP failure; backend continues to store codes in db.email_codes so the verify endpoint still functions end-to-end. Root cause of email delivery failure is invalid Gmail app password (env credential issue, not code)."
+}
