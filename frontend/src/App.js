@@ -60,7 +60,7 @@ function ToastProvider({ children }) {
 }
 
 // ===== Topbar =====
-function Topbar({ user, onLogout, onGoOpps }) {
+function Topbar({ user, onLogout, onGoOpps, onGoChat, unread }) {
   return (
     <div className="topbar">
       <div className="topbar-in">
@@ -70,6 +70,10 @@ function Topbar({ user, onLogout, onGoOpps }) {
             <>
               <span className="who">Olá, <b>{user.name?.split(" ")[0] || "atleta"}</b></span>
               {user.role && <span className={`role-badge ${user.role === "tecnico" ? "coach" : ""}`}>{user.role}</span>}
+              <button className="btn btn-ghost btn-sm" onClick={onGoChat} data-testid="nav-chat-btn" style={{ position: "relative" }}>
+                💬 Mensagens
+                {unread > 0 && <span style={{ position: "absolute", top: -4, right: -4, background: "var(--gold)", color: "#1a1205", borderRadius: "100px", fontSize: ".64rem", fontWeight: 800, padding: "2px 6px", lineHeight: 1 }} data-testid="chat-unread-badge">{unread}</span>}
+              </button>
               <button className="btn btn-ghost btn-sm" onClick={onGoOpps} data-testid="nav-opps-btn">Oportunidades</button>
               <button className="btn btn-ghost btn-sm" onClick={onLogout} data-testid="logout-btn">Sair</button>
             </>
@@ -754,8 +758,180 @@ function CoachView({ user, toast, onOpenCv }) {
   );
 }
 
+// ===== Chat =====
+function ChatView({ user, toast, initialOtherId, onBack }) {
+  const [convos, setConvos] = useState([]);
+  const [openId, setOpenId] = useState(initialOtherId || null);
+  const [thread, setThread] = useState(null);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const scrollRef = React.useRef(null);
+
+  const loadConvos = useCallback(async () => {
+    try {
+      const { data } = await api.get("/conversations");
+      setConvos(data);
+    } catch (e) { /* ignore */ }
+  }, []);
+
+  const loadThread = useCallback(async (otherId) => {
+    if (!otherId) return;
+    try {
+      const { data } = await api.get(`/messages/thread/${otherId}`);
+      setThread(data);
+      setTimeout(() => { scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight); }, 60);
+    } catch (e) { /* ignore */ }
+  }, []);
+
+  // eslint-disable-next-line
+  useEffect(() => { loadConvos(); }, [loadConvos]);
+  // eslint-disable-next-line
+  useEffect(() => { if (openId) loadThread(openId); else setThread(null); }, [openId, loadThread]);
+
+  // poll every 6s for live updates
+  /* eslint-disable */
+  useEffect(() => {
+    const t = setInterval(() => {
+      loadConvos();
+      if (openId) loadThread(openId);
+    }, 6000);
+    return () => clearInterval(t);
+  }, [openId, loadConvos, loadThread]);
+  /* eslint-enable */
+
+  const send = async () => {
+    if (!text.trim() || !openId) return;
+    setBusy(true);
+    try {
+      await api.post("/messages", { to_user_id: openId, text: text.trim() });
+      setText("");
+      await loadThread(openId);
+      loadConvos();
+    } catch { toast("Erro ao enviar"); }
+    setBusy(false);
+  };
+
+  const fmt = (iso) => {
+    try { const d = new Date(iso); return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) + " · " + d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" }); } catch { return ""; }
+  };
+
+  return (
+    <div className="app">
+      <button className="btn btn-ghost btn-sm" onClick={onBack} style={{ marginBottom: "1rem" }} data-testid="chat-back-btn">← Voltar pro painel</button>
+      <div className="dash-head">
+        <span className="ey">Mensagens</span>
+        <h1 className="display">Chat</h1>
+        <p>Converse direto com atletas e técnicos. As novas mensagens aparecem em tempo real.</p>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(220px, 320px) 1fr", gap: "1rem", minHeight: "60vh" }} className="chat-layout">
+        {/* Conversation list */}
+        <div className="panel" style={{ padding: ".4rem", margin: 0, alignSelf: "start" }} data-testid="convo-list">
+          {convos.length === 0 ? (
+            <p style={{ color: "var(--text-dim)", fontSize: ".9rem", padding: "1rem" }}>Sem conversas ainda. Vá no currículo de alguém e mande mensagem.</p>
+          ) : convos.map(c => (
+            <button
+              key={c.other_user_id}
+              onClick={() => setOpenId(c.other_user_id)}
+              data-testid={`convo-${c.other_user_id}`}
+              style={{
+                display: "flex", alignItems: "center", gap: ".7rem", width: "100%",
+                padding: ".8rem", borderRadius: "12px", marginBottom: ".25rem",
+                background: openId === c.other_user_id ? "var(--gold-soft)" : "transparent",
+                border: "1px solid " + (openId === c.other_user_id ? "var(--gold)" : "transparent"),
+                cursor: "pointer", textAlign: "left",
+              }}
+            >
+              <div className="avatar" style={{ width: 40, height: 40, fontSize: ".95rem", flex: "none" }}>
+                {c.other_photo ? <img src={c.other_photo} alt="" /> : initials(c.other_name)}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: ".4rem" }}>
+                  <b style={{ fontSize: ".9rem", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.other_name}</b>
+                  {c.unread > 0 && <span style={{ background: "var(--gold)", color: "#1a1205", borderRadius: "100px", fontSize: ".62rem", fontWeight: 800, padding: "2px 7px" }}>{c.unread}</span>}
+                </div>
+                <small style={{ color: "var(--text-dim)", fontSize: ".75rem", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
+                  {c.last_from_me ? "Você: " : ""}{c.last_text}
+                </small>
+              </div>
+            </button>
+          ))}
+        </div>
+
+        {/* Thread */}
+        <div className="panel" style={{ display: "flex", flexDirection: "column", margin: 0, padding: 0, minHeight: "60vh" }}>
+          {!openId ? (
+            <div style={{ display: "grid", placeItems: "center", flex: 1, color: "var(--text-faint)", padding: "2rem" }}>
+              Escolha uma conversa à esquerda. 💬
+            </div>
+          ) : !thread ? (
+            <div style={{ padding: "1rem", color: "var(--text-dim)" }}>Carregando…</div>
+          ) : (
+            <>
+              {/* header */}
+              <div style={{ display: "flex", alignItems: "center", gap: ".7rem", padding: ".9rem 1.1rem", borderBottom: "1px solid var(--line)" }}>
+                <div className="avatar" style={{ width: 42, height: 42, fontSize: "1rem", flex: "none" }}>
+                  {thread.other?.picture ? <img src={thread.other.picture} alt="" /> : initials(thread.other?.name)}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <b data-testid="thread-other-name">{thread.other?.name}</b>
+                  <div className="mono" style={{ color: "var(--text-dim)", fontSize: ".66rem", textTransform: "uppercase", letterSpacing: ".1em" }}>{thread.other?.role || "—"}</div>
+                </div>
+              </div>
+
+              {/* messages */}
+              <div ref={scrollRef} data-testid="thread-messages" style={{ flex: 1, overflowY: "auto", padding: "1rem", display: "flex", flexDirection: "column", gap: ".5rem", maxHeight: "55vh" }}>
+                {thread.messages.length === 0
+                  ? <p style={{ color: "var(--text-faint)", textAlign: "center", marginTop: "2rem" }}>Manda a primeira mensagem 👋</p>
+                  : thread.messages.map(m => {
+                      const mine = m.from_user_id === user.user_id;
+                      return (
+                        <div key={m.id} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start" }}>
+                          <div style={{
+                            maxWidth: "76%",
+                            background: mine ? "var(--gold)" : "var(--bg-2)",
+                            color: mine ? "#1a1205" : "var(--text)",
+                            border: "1px solid " + (mine ? "var(--gold)" : "var(--line)"),
+                            borderRadius: mine ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
+                            padding: ".6rem .85rem",
+                            fontSize: ".92rem",
+                            lineHeight: 1.4,
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                          }}>
+                            {m.text}
+                            <div style={{ marginTop: ".25rem", fontSize: ".6rem", opacity: .7, fontFamily: "'Space Mono',monospace" }}>{fmt(m.ts)}</div>
+                          </div>
+                        </div>
+                      );
+                  })
+                }
+              </div>
+
+              {/* compose */}
+              <div style={{ display: "flex", gap: ".5rem", padding: ".7rem .9rem", borderTop: "1px solid var(--line)" }}>
+                <textarea
+                  value={text}
+                  onChange={e => setText(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+                  placeholder="Escreva uma mensagem... (Enter envia)"
+                  data-testid="chat-input"
+                  style={{ flex: 1, background: "var(--bg-2)", border: "1px solid var(--line-strong)", borderRadius: "12px", padding: ".7rem .9rem", color: "var(--text)", fontFamily: "inherit", fontSize: ".95rem", resize: "none", minHeight: "44px", maxHeight: "120px" }}
+                />
+                <button className="btn btn-gold" onClick={send} disabled={busy || !text.trim()} data-testid="chat-send-btn">
+                  Enviar
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ===== Public CV =====
-function CvView({ athleteId, viewer, toast, onBack }) {
+function CvView({ athleteId, viewer, toast, onBack, onOpenChat }) {
   const [a, setA] = useState(null);
   const [msgOpen, setMsgOpen] = useState(false);
   const [msgText, setMsgText] = useState("");
@@ -846,11 +1022,15 @@ function CvView({ athleteId, viewer, toast, onBack }) {
               <div><span>Pé/mão</span><span>{a.dominant || "—"}</span></div>
               <div><span>Cidade</span><span>{a.city || "—"}</span></div>
             </div>
-            {viewer?.role === "tecnico" && viewer.user_id !== athleteId && (
+            {viewer && viewer.user_id !== athleteId && (
               <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: ".6rem" }}>
-                <button className="btn btn-gold" onClick={() => setMsgOpen(true)} data-testid="cv-message-btn">Mandar mensagem</button>
-                <button className="btn btn-ghost" onClick={toggleFav} data-testid="cv-fav-btn">♥ Favoritar</button>
-                {!a.verified && <button className="btn btn-azure" onClick={verify} data-testid="cv-verify-btn">✓ Verificar</button>}
+                <button className="btn btn-gold" onClick={() => onOpenChat && onOpenChat(athleteId)} data-testid="cv-message-btn">💬 Conversar</button>
+                {viewer.role === "tecnico" && (
+                  <>
+                    <button className="btn btn-ghost" onClick={toggleFav} data-testid="cv-fav-btn">♥ Favoritar</button>
+                    {!a.verified && <button className="btn btn-azure" onClick={verify} data-testid="cv-verify-btn">✓ Verificar</button>}
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -951,8 +1131,10 @@ function Dashboard() {
   const location = useLocation();
   const [user, setUser] = useState(location.state?.user || null);
   const [loading, setLoading] = useState(!location.state?.user);
-  const [page, setPage] = useState("home"); // home | cv | opps
+  const [page, setPage] = useState("home"); // home | cv | opps | chat
   const [cvId, setCvId] = useState(null);
+  const [chatOpenId, setChatOpenId] = useState(null);
+  const [unread, setUnread] = useState(0);
   const toast = React.useContext(ToastCtx);
 
   const checkAuth = useCallback(async () => {
@@ -971,6 +1153,22 @@ function Dashboard() {
   }, [user, checkAuth]);
   /* eslint-enable */
 
+  // Poll unread count
+  /* eslint-disable */
+  useEffect(() => {
+    if (!user || !user.role) return;
+    const refresh = async () => {
+      try {
+        const { data } = await api.get("/conversations");
+        setUnread(data.reduce((s, c) => s + (c.unread || 0), 0));
+      } catch (e) { /* ignore */ }
+    };
+    refresh();
+    const t = setInterval(refresh, 12000);
+    return () => clearInterval(t);
+  }, [user, page]);
+  /* eslint-enable */
+
   const logout = async () => {
     try { await api.post("/auth/logout"); } catch (e) { /* ignore */ }
     setUser(null); navigate("/", { replace: true });
@@ -981,19 +1179,21 @@ function Dashboard() {
   };
   const openCv = (id) => { setCvId(id); setPage("cv"); window.scrollTo(0, 0); };
   const openOpps = () => { setPage("opps"); window.scrollTo(0, 0); };
+  const openChat = (otherId = null) => { setChatOpenId(otherId); setPage("chat"); window.scrollTo(0, 0); };
   const backHome = () => { setPage("home"); window.scrollTo(0, 0); };
 
   if (loading) return <div className="shell"><div className="card-auth"><h1 className="display">Carregando…</h1></div></div>;
   if (!user) return <Landing />;
-  if (!user.role) return (<><Topbar user={user} onLogout={logout} onGoOpps={openOpps} /><RolePick onPick={pickRole} /></>);
+  if (!user.role) return (<><Topbar user={user} onLogout={logout} onGoOpps={openOpps} onGoChat={() => openChat()} unread={unread} /><RolePick onPick={pickRole} /></>);
 
   return (
     <>
-      <Topbar user={user} onLogout={logout} onGoOpps={openOpps} />
+      <Topbar user={user} onLogout={logout} onGoOpps={openOpps} onGoChat={() => openChat()} unread={unread} />
       {page === "home" && user.role === "atleta" && <AthleteView user={user} toast={toast} onOpenCv={openCv} />}
       {page === "home" && user.role === "tecnico" && <CoachView user={user} toast={toast} onOpenCv={openCv} />}
-      {page === "cv" && <CvView athleteId={cvId} viewer={user} toast={toast} onBack={backHome} />}
+      {page === "cv" && <CvView athleteId={cvId} viewer={user} toast={toast} onBack={backHome} onOpenChat={openChat} />}
       {page === "opps" && <OppsView user={user} toast={toast} onBack={backHome} />}
+      {page === "chat" && <ChatView user={user} toast={toast} initialOtherId={chatOpenId} onBack={backHome} />}
     </>
   );
 }

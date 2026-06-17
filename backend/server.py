@@ -742,9 +742,11 @@ async def msg_send(p: MessagePayload, user=Depends(get_user_from_session)):
         "id": gen_id("msg"),
         "from_user_id": user["user_id"],
         "from_name": user.get("name"),
+        "from_role": user.get("role"),
         "to_user_id": p.to_user_id,
         "text": p.text,
         "about_opp": p.about_opp,
+        "read": False,
         "ts": now_utc().isoformat(),
     }
     await db.messages.insert_one(dict(msg))
@@ -757,6 +759,64 @@ async def msg_inbox(user=Depends(get_user_from_session)):
         {"to_user_id": user["user_id"]}, {"_id": 0}
     ).sort("ts", -1).to_list(100)
     return rows
+
+
+@api.get("/conversations")
+async def conversations(user=Depends(get_user_from_session)):
+    """List unique conversations (grouped by the other party) with last msg + unread."""
+    uid = user["user_id"]
+    cursor = db.messages.find(
+        {"$or": [{"from_user_id": uid}, {"to_user_id": uid}]}, {"_id": 0}
+    ).sort("ts", -1)
+    all_msgs = await cursor.to_list(2000)
+    groups: Dict[str, Dict[str, Any]] = {}
+    for m in all_msgs:
+        other = m["to_user_id"] if m["from_user_id"] == uid else m["from_user_id"]
+        if other not in groups:
+            groups[other] = {
+                "other_user_id": other,
+                "last_text": m["text"],
+                "last_ts": m["ts"],
+                "last_from_me": m["from_user_id"] == uid,
+                "unread": 0,
+            }
+        if m["to_user_id"] == uid and not m.get("read"):
+            groups[other]["unread"] += 1
+    # enrich with name/photo
+    out = []
+    for other_id, g in groups.items():
+        u = await db.users.find_one({"user_id": other_id}, {"_id": 0, "password_hash": 0})
+        if not u:
+            continue
+        a = await db.athletes.find_one({"user_id": other_id}, {"_id": 0})
+        photo = (a and a.get("photo")) or u.get("picture") or ""
+        out.append({
+            **g,
+            "other_name": u.get("name", "—"),
+            "other_role": u.get("role"),
+            "other_photo": photo,
+        })
+    out.sort(key=lambda x: x["last_ts"], reverse=True)
+    return out
+
+
+@api.get("/messages/thread/{other_user_id}")
+async def msg_thread(other_user_id: str, user=Depends(get_user_from_session)):
+    uid = user["user_id"]
+    rows = await db.messages.find(
+        {"$or": [
+            {"from_user_id": uid, "to_user_id": other_user_id},
+            {"from_user_id": other_user_id, "to_user_id": uid},
+        ]},
+        {"_id": 0},
+    ).sort("ts", 1).to_list(500)
+    # mark inbound as read
+    await db.messages.update_many(
+        {"from_user_id": other_user_id, "to_user_id": uid, "read": {"$ne": True}},
+        {"$set": {"read": True}},
+    )
+    other = await db.users.find_one({"user_id": other_user_id}, {"_id": 0, "password_hash": 0})
+    return {"messages": rows, "other": other}
 
 
 # ---------- Opportunities ----------
