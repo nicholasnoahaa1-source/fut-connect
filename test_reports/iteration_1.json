@@ -1,0 +1,51 @@
+{
+  "summary": "First-iteration full-stack test of Fut Connect. Backend: 22/23 pytest tests passed (one AI failure due to Emergent LLM key BUDGET_EXCEEDED on the long /ai/recommend prompt). Frontend: cookie-based auth via /dashboard route works; role-pick, athlete dashboard render, add video, opportunities view, coach search (1 result returned despite 4 demo athletes seeded - see context), favorite, message send, logout all PASS. Found one CRITICAL frontend bug: PUT /api/athlete/me returns 422 because empty numeric inputs are sent as empty strings.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "/api/ai/recommend", "issue": "Returns fallback text 'Não consegui gerar agora.' because Emergent LLM key BUDGET_EXCEEDED for this single call (litellm.BadRequestError: 'Current cost: 0.00507, Max budget: 0.001'). The prompt includes up to 8 athletes which exceeds per-call budget. Suggest trimming the prompt (top 5 instead of 8) and/or requesting budget increase for the EMERGENT_LLM_KEY.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "PUT /api/athlete/me", "issue": "Pydantic Optional[int] does not coerce empty string '' to None — frontend currently sends empty strings, resulting in 422. Backend could be more forgiving (validator that turns '' into None) — see frontend bug below for the primary fix."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "AthleteView.save", "issue": "Saving profile with any unfilled numeric field (age/height/weight) returns 422 from backend because empty string '' is sent for Optional[int] fields. Repro: fresh athlete user, fill only name+city, click 'Salvar perfil' — see 422 + uncaught AxiosError overlay. Fix: in save(), build a clean payload converting '' to null for age/height/weight (and ideally Number-coerce on send).", "selector": "[data-testid='save-profile-btn']", "priority": "CRITICAL"},
+      {"component": "Uncaught error overlay", "issue": "Axios 401/422 errors are not caught — they bubble up to React dev overlay, blocking the user. Wrap api calls in try/catch and surface a toast.", "selector": "n/a", "priority": "HIGH"}
+    ],
+    "integration_issues": [
+      {"flow": "Coach search with no filters", "issue": "Coach search with empty form returns only 1 athlete card despite 4 demo athletes seeded. Likely because the default search payload sets sport='Futebol' (only Lucas matches). UX: empty 'sport' should mean all sports.", "affected_selectors": ["[data-testid='search-results']", "[data-testid='search-btn']"]}
+    ],
+    "design_issues": [
+      {"screen": "AthleteView empty state", "issues": ["Initial numeric inputs render as empty strings; placeholders are good but UX would be better with sensible defaults (e.g. age=16)."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "FIX FRONTEND: In AthleteView.save() build a clean payload converting empty strings for age/height/weight to null (or omit them). Also add try/catch with toast around api.put.",
+    "Trim AI recommend prompt (top 5 athletes) and/or request EMERGENT_LLM_KEY budget bump — current per-call max is 0.001 and recommend costs ~0.005.",
+    "Default coach search sport to '' (all sports) rather than 'Futebol' so the initial search returns all demo athletes.",
+    "Backend: add @validator on AthletePayload to coerce '' → None for numeric Optional[int] fields, as a defensive layer."
+  ],
+  "critical_code_review_comments": [
+    "App.js is 832 lines — split LoginView/AthleteView/CoachView/CvView/OppsView into separate files for maintainability.",
+    "server.py uses `@app.on_event('startup')` which is deprecated in FastAPI; migrate to lifespan handlers.",
+    "Backend has no per-route validation that opportunity creator owns the opp before DELETE /api/opportunities/{id} (it filters by coach_id which is correct — good). Same pattern looks OK across endpoints.",
+    "MongoDB queries correctly use {'_id': 0} projection — good.",
+    "All API URLs from REACT_APP_BACKEND_URL/process.env — good, no hardcoding.",
+    "All interactive elements have data-testid — excellent test coverage scaffolding."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py (created)"
+  ],
+  "success_rate": {"backend": "95.6% (22/23 — one AI test blocked by LLM budget)", "frontend": "~80% (role-pick, video, opps, coach search/fav/message, logout work; save-profile blocked by 422 bug)"},
+  "test_credentials": "Cookie-based: seed test users via mongosh (see /app/memory/test_credentials.md). For automation use Bearer Authorization header with session_token from db.user_sessions.",
+  "seed_data_creation": "Backend auto-seeds 4 demo athletes on startup if empty (Lucas Maré, Bia Armadora, Day Paralímpica, Rafa Veloz). Test users created via mongosh during test run were cleaned up.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Frontend route /dashboard is the auth-gated entry; / always shows LoginView. Auth via cookie `session_token` (httpOnly fine for backend, but tests should use httpOnly:false to set via Playwright). Bearer header also works for backend tests. AI tests may hit Emergent LLM key budget cap (~0.001/call) — keep the analyze prompt short. Demo athletes are seeded only when athletes collection is empty.",
+  "rca of the issue": "422 on save: AthleteView initializes p.age='', p.height='', p.weight='' when no profile exists. On save, axios sends the entire `p` object including empty strings to backend's AthletePayload (Optional[int] fields). Pydantic rejects '' as int → 422 Unprocessable Entity. The React DevServer error overlay then catches the uncaught AxiosError and blocks the UI. Fix: clean payload before send OR coerce '' to None in a Pydantic validator. LLM budget: emergentintegrations LiteLLM enforces a 0.001 max budget per call for this key; /ai/recommend prompt with top-8 athletes summary exceeds it. Trim to top 5 or shorten the prompt format."
+}
