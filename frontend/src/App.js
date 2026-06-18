@@ -145,8 +145,13 @@ function LoginView({ toast, onSignedIn, onNeedVerify }) {
     setBusy(true);
     try {
       if (forgotStep === 1) {
-        await api.post("/auth/forgot-password", { email: forgotData.email });
-        toast("Se o e-mail existir, mandamos um código");
+        const { data } = await api.post("/auth/forgot-password", { email: forgotData.email });
+        if (data?.dev_code) {
+          setForgotData(prev => ({ ...prev, code: data.dev_code }));
+          toast(`Código (e-mail offline): ${data.dev_code}`);
+        } else {
+          toast("Se o e-mail existir, mandamos um código");
+        }
         setForgotStep(2);
       } else {
         await api.post("/auth/reset-password", forgotData);
