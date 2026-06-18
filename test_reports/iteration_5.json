@@ -1,0 +1,47 @@
+{
+  "summary": "Iter 5 bug-fix validation. Backend: 8/8 new tests (decimal coercion + dev_code fallback) PASS, 49/49 regression PASS. Frontend: Signup→Verify→Dashboard auto-fill flow PASS (dev_code callout visible, input pre-filled, lands on /dashboard). Athlete dashboard decimal h/w save (189.5/88.3 → 190/88) PASS — no 422. Forgot-password dev_code auto-fill FAILED — frontend bug: doForgot in App.js does not read dev_code from response.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "AuthView.doForgot (App.js lines 144-161)",
+        "issue": "Forgot-password flow does NOT capture dev_code from /api/auth/forgot-password response and does NOT pre-fill forgotData.code in step 2. The backend correctly returns dev_code (verified via direct API call), but the frontend ignores it. Review request explicitly required step-2 auto-fill if dev_code present.",
+        "selector": "[data-testid=\"forgot-code-input\"]",
+        "priority": "MEDIUM"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter5_fixes.py",
+    "/app/test_reports/pytest/iter5_results.xml",
+    "/app/test_reports/pytest/iter5_regression.xml"
+  ],
+  "action_items": [
+    "Frontend: In /app/frontend/src/App.js doForgot() step 1 branch, read response and pre-fill forgotData.code if response.data.dev_code present, plus optional yellow callout in the forgot card mirroring VerifyView pattern. Suggested patch: `const { data } = await api.post('/auth/forgot-password', { email: forgotData.email }); if (data?.dev_code) { setForgotData(prev => ({ ...prev, code: data.dev_code })); toast(`Código (e-mail offline): ${data.dev_code}`); } setForgotStep(2);`"
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1078 lines — still above recommended 700-line split threshold (carryover from iter 4).",
+    "App.js is now 1259 lines — recommend extracting AuthView/VerifyView and DashboardView into separate files.",
+    "AthletePayload.height/weight validator silently coerces invalid strings to None (line 200-201). Acceptable for empty strings, but '188cm' would silently become None instead of 422. Consider explicit error for non-numeric non-empty strings.",
+    "doForgot in App.js (line 144) doesn't handle dev_code — see action item.",
+    "Backend forgot-password correctly returns 200 + no dev_code for unknown email (avoids enumeration) — good security posture verified via test_forgot_unknown_email_no_dev_code."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter5_fixes.py (new — 8 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (8/8 iter5 + 49/49 regression)",
+    "frontend": "75% (signup-verify-dashboard + decimal save PASS; forgot-password auto-fill FAIL; login-403→resend not exercisable in normal flow because /auth/signup doesn't create users.verified=False — only verify creates the user row)"
+  },
+  "test_credentials": "Tests create their own users via /api/auth/signup with TEST_ prefix and clean up via the test_iter5_fixes.py fixture.",
+  "seed_data_creation": "Per-test ephemeral users prefixed TEST_iter5_*; cleaned in fixture teardown. UI tests used random emails ui_iter5_<ts>@example.com (leftover in db but isolated by timestamp).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iter5 backend bug-fixes (Pydantic field_validator coercing floats and dev_code fallbacks) all verified. The remaining gap is the forgot-password UI auto-fill which needs a small frontend patch in App.js doForgot (~5 lines). Login-403 → resend path is implemented correctly in code (App.js line 129-136) but cannot be triggered through normal signup flow because signup never sets users.verified=False — the user row is only created on /auth/verify with verified=True. To functionally test the 403 path, manually seed a user with password_hash + verified:false via mongosh.",
+  "rca of the issue": "Frontend doForgot in App.js was not updated alongside doSignup/doLogin to capture dev_code. The backend changes (returning dev_code in /auth/forgot-password response) are correct; the corresponding UI change is missing."
+}

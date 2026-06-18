@@ -40,6 +40,16 @@ app = FastAPI(title="Fut Connect API")
 api = APIRouter(prefix="/api")
 
 
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse as _JR
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    logger.error("422 on %s %s | errors=%s | body=%s", request.method, request.url.path, exc.errors(), exc.body if hasattr(exc, "body") else "?")
+    return _JR(status_code=422, content={"detail": exc.errors()})
+
+
 # ---------- Helpers ----------
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -181,6 +191,14 @@ class AthletePayload(BaseModel):
     def _empty_str_to_none(cls, v):
         if v == "" or v is None:
             return None
+        # Coerce decimals (189.5cm, 88.3kg) to int
+        if isinstance(v, float):
+            return int(round(v))
+        if isinstance(v, str):
+            try:
+                return int(round(float(v)))
+            except (ValueError, TypeError):
+                return None
         return v
 
 
@@ -307,7 +325,11 @@ async def auth_signup(payload: SignupPayload):
     )
     html, text = code_email_html(code, "confirmar tua conta")
     sent = send_email(email, "Teu código Fut Connect", html, text)
-    return {"ok": True, "email": email, "email_sent": sent}
+    # Dev fallback: if SMTP rejected, return code so user can still verify
+    resp = {"ok": True, "email": email, "email_sent": sent}
+    if not sent:
+        resp["dev_code"] = code
+    return resp
 
 
 @api.post("/auth/verify")
@@ -380,7 +402,10 @@ async def auth_resend(payload: ForgotPayload):
     )
     html, text = code_email_html(code, "confirmar tua conta")
     sent = send_email(email, "Teu código Fut Connect", html, text)
-    return {"ok": True, "email_sent": sent}
+    resp = {"ok": True, "email_sent": sent}
+    if not sent:
+        resp["dev_code"] = code
+    return resp
 
 
 @api.post("/auth/forgot-password")
@@ -400,7 +425,10 @@ async def auth_forgot(payload: ForgotPayload):
     )
     html, text = code_email_html(code, "recuperar tua senha")
     sent = send_email(email, "Recuperar senha — Fut Connect", html, text)
-    return {"ok": True, "email_sent": sent}
+    resp = {"ok": True, "email_sent": sent}
+    if not sent:
+        resp["dev_code"] = code
+    return resp
 
 
 @api.post("/auth/reset-password")

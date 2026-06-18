@@ -105,9 +105,14 @@ function LoginView({ toast, onSignedIn, onNeedVerify }) {
     }
     setBusy(true);
     try {
-      await api.post("/auth/signup", form);
-      toast("Código enviado! Confere teu e-mail 📧");
-      onNeedVerify(form.email);
+      const { data } = await api.post("/auth/signup", form);
+      if (data.dev_code) {
+        toast(`Código (e-mail offline): ${data.dev_code}`);
+        onNeedVerify(form.email, data.dev_code);
+      } else {
+        toast("Código enviado! Confere teu e-mail 📧");
+        onNeedVerify(form.email, null);
+      }
     } catch (e) {
       toast(e.response?.data?.detail || "Erro no cadastro");
     }
@@ -123,7 +128,12 @@ function LoginView({ toast, onSignedIn, onNeedVerify }) {
       const msg = e.response?.data?.detail || "Erro no login";
       if (e.response?.status === 403) {
         toast("Confirma teu e-mail primeiro 📧");
-        onNeedVerify(form.email);
+        try {
+          const { data } = await api.post("/auth/resend-code", { email: form.email });
+          onNeedVerify(form.email, data?.dev_code || null);
+        } catch (err) {
+          onNeedVerify(form.email, null);
+        }
       } else {
         toast(msg);
       }
@@ -226,8 +236,8 @@ function tabStyle(active) {
 }
 
 // ===== Verify code =====
-function VerifyView({ email, onVerified, toast, onBack }) {
-  const [code, setCode] = useState("");
+function VerifyView({ email, devCode, onVerified, toast, onBack }) {
+  const [code, setCode] = useState(devCode || "");
   const [busy, setBusy] = useState(false);
   const submit = async () => {
     if (code.length !== 6) { toast("Código de 6 dígitos"); return; }
@@ -241,7 +251,11 @@ function VerifyView({ email, onVerified, toast, onBack }) {
     setBusy(false);
   };
   const resend = async () => {
-    try { await api.post("/auth/resend-code", { email }); toast("Código reenviado"); }
+    try {
+      const { data } = await api.post("/auth/resend-code", { email });
+      if (data.dev_code) { setCode(data.dev_code); toast(`Código: ${data.dev_code}`); }
+      else { toast("Código reenviado"); }
+    }
     catch (e) { toast(e.response?.data?.detail || "Erro"); }
   };
   return (
@@ -249,6 +263,13 @@ function VerifyView({ email, onVerified, toast, onBack }) {
       <div className="card-auth">
         <h1 className="display">Confirma teu e-mail</h1>
         <p className="sub">Mandamos um código de 6 dígitos pra <b style={{ color: "var(--gold)" }}>{email}</b>. Procura na caixa de entrada (ou spam).</p>
+        {devCode && (
+          <div style={{ background: "rgba(255,194,61,.13)", border: "1px solid var(--gold)", borderRadius: "12px", padding: ".8rem 1rem", marginBottom: "1rem", fontSize: ".82rem", color: "var(--gold-hi)" }}>
+            <b>📬 Modo dev:</b> e-mail não pôde ser enviado. Teu código é:
+            <div style={{ fontFamily: "'Space Mono',monospace", fontSize: "1.4rem", letterSpacing: ".4em", color: "var(--gold)", textAlign: "center", margin: ".5rem 0", fontWeight: 700 }} data-testid="dev-code">{devCode}</div>
+            <small style={{ color: "var(--text-dim)" }}>Já preenchemos pra ti — só clica Confirmar.</small>
+          </div>
+        )}
         <div className="field"><label>Código</label>
           <input type="text" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} maxLength={6} className="code-input" style={{ textAlign: "center", fontFamily: "'Space Mono',monospace", fontSize: "1.5rem", letterSpacing: ".4em" }} placeholder="------" data-testid="verify-code-input" />
         </div>
@@ -1202,11 +1223,11 @@ function Dashboard() {
 function Landing() {
   const navigate = useNavigate();
   const toast = React.useContext(ToastCtx);
-  const [needVerifyEmail, setNeedVerifyEmail] = useState(null);
-  if (needVerifyEmail) {
-    return (<><Topbar /><VerifyView email={needVerifyEmail} toast={toast} onBack={() => setNeedVerifyEmail(null)} onVerified={(u) => navigate("/dashboard", { state: { user: u } })} /></>);
+  const [verifyState, setVerifyState] = useState(null); // { email, devCode }
+  if (verifyState) {
+    return (<><Topbar /><VerifyView email={verifyState.email} devCode={verifyState.devCode} toast={toast} onBack={() => setVerifyState(null)} onVerified={(u) => navigate("/dashboard", { state: { user: u } })} /></>);
   }
-  return (<><Topbar /><LoginView toast={toast} onSignedIn={(u) => navigate("/dashboard", { state: { user: u } })} onNeedVerify={(em) => setNeedVerifyEmail(em)} /></>);
+  return (<><Topbar /><LoginView toast={toast} onSignedIn={(u) => navigate("/dashboard", { state: { user: u } })} onNeedVerify={(em, code) => setVerifyState({ email: em, devCode: code })} /></>);
 }
 
 // ===== Router =====
