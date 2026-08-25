@@ -1,0 +1,18 @@
+# Planned NoahSpeech-1 model variants. Only "base" is the current build
+# target; nano/pro are documented for the roadmap (see REPORT.md).
+variants:
+  nano:
+    base_model: openai/whisper-base
+    description: Low-latency, low-VRAM variant for edge/CPU streaming use cases.
+    lora_config: configs/lora_default.yaml
+    status: planned
+  base:
+    base_model: openai/whisper-large-v3-turbo
+    description: Primary target — balances accuracy and latency for PT-BR ASR.
+    lora_config: configs/lora_default.yaml
+    status: in_development
+  pro:
+    base_model: openai/whisper-large-v3
+    description: Max-accuracy variant for offline/batch transcription where latency matters less.
+    lora_config: configs/lora_wide.yaml
+    status: planned

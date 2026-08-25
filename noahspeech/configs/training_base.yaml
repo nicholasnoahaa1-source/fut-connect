@@ -1,0 +1,19 @@
+# Training config for the "base" model variant (start here before nano/pro).
+base_model: openai/whisper-large-v3-turbo
+lora_config: configs/lora_default.yaml
+output_dir: checkpoints
+batch_size: 16
+grad_accum_steps: 2
+gradient_checkpointing: true
+max_segment_length_s: 30
+precision: bfloat16          # falls back to float16 then float32 via the OOM ladder
+learning_rate: 1.0e-4
+warmup_ratio: 0.03
+max_grad_norm: 1.0
+num_epochs: 10
+steps_per_epoch: 1000
+eval_every_steps: 200
+early_stopping_patience: 5
+freeze_encoder: false
+freeze_decoder_base: false
+lora_only: true

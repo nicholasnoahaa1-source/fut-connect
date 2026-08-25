@@ -1,0 +1,11 @@
+# Starting-point LoRA config, per REPORT.md's training plan.
+# Tune target_modules / r / alpha based on error analysis (see REPORT.md,
+# "Iterative Improvement Loop").
+r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+target_modules:
+  - q_proj
+  - v_proj
+bias: none
+task_type: SEQ_2_SEQ_LM

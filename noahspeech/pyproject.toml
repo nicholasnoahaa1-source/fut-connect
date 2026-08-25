@@ -1,0 +1,17 @@
+[project]
+name = "noahspeech"
+version = "0.1.0"
+description = "NoahSpeech-1: a PT-BR-focused ASR system built on Whisper + LoRA fine-tuning."
+requires-python = ">=3.10"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["noahspeech*"]
