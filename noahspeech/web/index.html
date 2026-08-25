@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>NoahSpeech-1</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; }
+  fieldset { margin-bottom: 1rem; border-radius: 8px; }
+  label { display: block; margin: 0.5rem 0 0.2rem; font-size: 0.9rem; }
+  #transcript { white-space: pre-wrap; border: 1px solid #8884; border-radius: 8px; padding: 1rem; min-height: 4rem; }
+  #segments { font-size: 0.85rem; opacity: 0.8; margin-top: 0.5rem; }
+  button { padding: 0.5rem 1rem; cursor: pointer; }
+  #timing { font-size: 0.8rem; opacity: 0.7; margin-top: 0.5rem; }
+</style>
+</head>
+<body>
+<h1>NoahSpeech-1</h1>
+<p>PT-BR speech-to-text — upload a file, record from your mic, or stream live.</p>
+
+<fieldset>
+  <legend>Settings</legend>
+  <label for="apiBase">API base URL</label>
+  <input id="apiBase" value="http://localhost:8000" style="width:100%" />
+
+  <label for="model">Model</label>
+  <select id="model">
+    <option value="noahspeech-1-base">noahspeech-1-base</option>
+    <option value="noahspeech-1-nano">noahspeech-1-nano</option>
+    <option value="noahspeech-1-pro">noahspeech-1-pro</option>
+  </select>
+
+  <label for="language">Language</label>
+  <input id="language" value="pt" style="width:6rem" />
+
+  <label><input type="checkbox" id="timestamps" checked /> word/segment timestamps</label>
+</fieldset>
+
+<fieldset>
+  <legend>Input</legend>
+  <input type="file" id="fileInput" accept="audio/*" />
+  <br /><br />
+  <button id="recordBtn">Record from mic</button>
+  <button id="streamBtn">Toggle streaming mode</button>
+</fieldset>
+
+<button id="transcribeBtn">Transcribe</button>
+
+<h3>Transcript</h3>
+<div id="transcript">(no result yet)</div>
+<div id="segments"></div>
+<div id="timing"></div>
+
+<script>
+const apiBase = () => document.getElementById('apiBase').value.replace(/\/$/, '');
+let recordedBlob = null;
+let mediaRecorder = null;
+let streaming = false;
+let ws = null;
+
+document.getElementById('recordBtn').onclick = async () => {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    document.getElementById('recordBtn').textContent = 'Record from mic';
+    return;
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const chunks = [];
+  mediaRecorder = new MediaRecorder(stream);
+  mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+  mediaRecorder.onstop = () => {
+    recordedBlob = new Blob(chunks, { type: 'audio/webm' });
+    stream.getTracks().forEach((t) => t.stop());
+  };
+  mediaRecorder.start();
+  document.getElementById('recordBtn').textContent = 'Stop recording';
+};
+
+document.getElementById('transcribeBtn').onclick = async () => {
+  const fileInput = document.getElementById('fileInput');
+  const blob = fileInput.files[0] || recordedBlob;
+  if (!blob) { alert('Choose a file or record audio first.'); return; }
+
+  const form = new FormData();
+  form.append('file', blob, blob.name || 'recording.webm');
+  form.append('model', document.getElementById('model').value);
+  form.append('language', document.getElementById('language').value);
+  form.append('timestamps', document.getElementById('timestamps').checked);
+
+  const t0 = performance.now();
+  document.getElementById('transcript').textContent = 'Transcribing...';
+  try {
+    const res = await fetch(`${apiBase()}/v1/audio/transcriptions`, { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    document.getElementById('transcript').textContent = data.text;
+    document.getElementById('segments').textContent = (data.segments || [])
+      .map((s) => `[${s.start.toFixed(2)}s - ${s.end.toFixed(2)}s] ${s.text}`)
+      .join('\n');
+    document.getElementById('timing').textContent =
+      `server inference: ${data.inference_time_s.toFixed(2)}s · round-trip: ${((performance.now() - t0) / 1000).toFixed(2)}s`;
+  } catch (err) {
+    document.getElementById('transcript').textContent = `Error: ${err.message}`;
+  }
+};
+
+document.getElementById('streamBtn').onclick = async () => {
+  if (streaming) {
+    ws?.close();
+    streaming = false;
+    document.getElementById('streamBtn').textContent = 'Toggle streaming mode';
+    return;
+  }
+  const wsUrl = apiBase().replace(/^http/, 'ws') + `/v1/audio/stream?model=${document.getElementById('model').value}`;
+  ws = new WebSocket(wsUrl);
+  ws.onmessage = (evt) => {
+    const data = JSON.parse(evt.data);
+    document.getElementById('transcript').textContent =
+      (data.is_final ? '[final] ' : '[partial] ') + data.text;
+  };
+  ws.onopen = async () => {
+    streaming = true;
+    document.getElementById('streamBtn').textContent = 'Stop streaming';
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    source.connect(processor);
+    processor.connect(ctx.destination);
+    processor.onaudioprocess = (e) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(e.inputBuffer.getChannelData(0).slice().buffer);
+    };
+  };
+};
+</script>
+</body>
+</html>

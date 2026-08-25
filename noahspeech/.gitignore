@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+checkpoints/last_checkpoint/
+checkpoints/best_model/
+checkpoints/quantized/
+checkpoints/ctranslate2/
+checkpoints/merged/
+!checkpoints/.gitkeep
+data/splits/
+*.egg-info/

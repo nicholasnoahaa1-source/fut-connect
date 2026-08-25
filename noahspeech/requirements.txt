@@ -1,0 +1,42 @@
+# Core ML stack. torch/transformers/peft/accelerate/datasets successfully
+# installed and import-verified in this sandbox (CPU-only build; no GPU
+# present here, see REPORT.md). Pin loosely — tighten once trained against a
+# known-good combination.
+torch>=2.2
+transformers>=4.40
+peft>=0.10
+accelerate>=0.29
+datasets>=2.18
+
+# Metrics
+jiwer>=3.0
+
+# Audio I/O
+soundfile>=0.12
+librosa>=0.10
+pydub>=0.25          # requires the `ffmpeg` binary on PATH for mp3/m4a/webm; not present in this sandbox
+numpy>=1.26
+
+# VAD — webrtcvad installed but failed to import here (`pkg_resources` missing,
+# i.e. setuptools not present at import time in this sandbox); code degrades
+# to an energy-based VAD fallback automatically (see noahspeech/inference/vad.py).
+# `pip install setuptools` alongside it resolves this on a normal machine.
+webrtcvad>=2.0.10
+
+# Fast inference
+ctranslate2>=4.0
+faster-whisper>=1.0
+
+# API
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pydantic>=2.6
+
+# Config / utils
+pyyaml>=6.0
+
+# Testing
+pytest>=8.0
+pytest-asyncio>=0.23
+httpx>=0.27           # required by FastAPI's TestClient
