@@ -210,6 +210,33 @@ sandbox, would report `noahspeech-1: not_run (reason: model load failed —
 no HF Hub access)` — that is the honest current state, not a placeholder to
 be filled in later by hand.
 
+**Dataset pipeline end-to-end smoke test (actually run, real output)**: since
+no PT-BR audio corpus is available here, `scripts/dev/generate_synthetic_sample.py`
+writes 12 rows of sine-tone-plus-noise WAV files (not speech — useless for
+training, only for exercising file-level logic) into `data/raw_sample/`,
+with 7 rows deliberately defective: a reused audio path, a duplicate
+transcript, an empty transcript, a near-silent file, a too-short file, a
+clipped/too-loud file, and a corrupt (non-audio) file. Running
+`scripts/clean_dataset.py data/raw_sample/manifest.csv` on it produced:
+```
+{
+  "total_rows": 12, "clean_rows": 5, "rejected_rows": 7,
+  "issue_counts": {
+    "duplicate_audio_path": 2, "duplicate_transcript_text": 1,
+    "empty_transcript": 1, "near_silent": 1, "duration_too_short": 1,
+    "abnormal_volume_clipping": 1, "corrupt_audio": 1
+  }
+}
+```
+All 7 planted defects were caught correctly, 5 clean rows passed. Feeding
+`manifest_clean.csv` into `scripts/prepare_dataset.py` then produced a
+90/5/5 split (`train: 4, val: 0, test: 1` — val rounds to 0 at n=5, expected
+at this tiny scale) with `"leakage_check": "passed"`. The full `pytest
+tests/ -v` suite was re-run afterward and still reports **42 passed, 1
+skipped**. This confirms the dataset pipeline's file-handling and validation
+logic is correct; it does not and cannot validate transcript *quality*,
+since the audio is not real speech.
+
 ## 8. Next steps for someone with a GPU + PT-BR dataset
 
 1. `pip install -r requirements.txt` on a machine with network access to
