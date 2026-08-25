@@ -237,6 +237,42 @@ skipped**. This confirms the dataset pipeline's file-handling and validation
 logic is correct; it does not and cannot validate transcript *quality*,
 since the audio is not real speech.
 
+**LoRA training-loop mechanics smoke test (actually run, real output)**:
+`scripts/train.py`'s real forward/backward pass is stubbed with
+`NotImplementedError` (see above) because there is no PT-BR dataset and no
+downloadable Whisper checkpoint here. To validate the surrounding mechanics
+that *don't* depend on either — LoRA adapter attachment, the OOM recovery
+ladder's config mutations, gradient clipping, checkpoint save, and
+checkpoint resume — `scripts/dev/train_smoke_test.py` builds a tiny,
+randomly-initialized `WhisperForConditionalGeneration` locally via
+`WhisperConfig` (no network call, ~13k params instead of whisper-large-v3
+-turbo's ~809M), wraps it with the repo's real `configs/lora_default.yaml`
+(r=16/alpha=32/dropout=0.05 on q_proj/v_proj), and runs real training steps
+against random tensors of the correct shape. Real output:
+```
+LoRA applied: 3072/16496 params trainable (18.6%)
+OOM ladder after 3 simulated OOMs: ['halve_batch_size', 'double_grad_accum', 'enable_grad_checkpointing']
+resulting config: {'batch_size': 4, 'grad_accum_steps': 2, 'precision': 'bfloat16', 'gradient_checkpointing': True}
+step 0: loss=4.3997
+step 1: loss=4.4217
+step 2: loss=4.3951
+step 3: loss=4.4116
+step 4: loss=4.3837
+loss diff (same input, original vs resumed model): 0.000000
+```
+Losses fluctuate rather than monotonically decrease — expected for 5 steps
+on random labels with no real signal to learn, not a claim of convergence.
+The checkpoint-resume loss diff of exactly `0.000000` confirms save/resume
+preserves the trained LoRA adapter weights bit-for-bit. This mechanics test
+is now also a permanent pytest test
+(`tests/test_train_mechanics.py::test_lora_train_checkpoint_resume_real_forward_backward`,
+plus 3 pure-logic tests of the OOM ladder), so `pytest tests/ -v` now
+reports **46 passed, 1 skipped** (up from 42 passed).
+
+This proves the training *plumbing* is correct. It proves nothing about
+transcription accuracy — that requires the real whisper-large-v3-turbo
+checkpoint and a real PT-BR dataset, neither available here.
+
 ## 8. Next steps for someone with a GPU + PT-BR dataset
 
 1. `pip install -r requirements.txt` on a machine with network access to
