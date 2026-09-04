@@ -23,6 +23,44 @@ function Stat({ label, value, unit, icon, goal }) {
   );
 }
 
+function LineChart({ points, color = "var(--gold)", width = 280, height = 70, formatValue }) {
+  const vals = points.map((p) => p.value ?? 0);
+  const max = Math.max(...vals, 1);
+  const min = Math.min(...vals, 0);
+  const range = max - min || 1;
+  const stepX = points.length > 1 ? width / (points.length - 1) : 0;
+  const coords = points.map((p, i) => {
+    const x = i * stepX;
+    const y = height - ((p.value ?? 0) - min) / range * (height - 10) - 5;
+    return { x, y, ...p };
+  });
+  const path = coords.map((c, i) => `${i === 0 ? "M" : "L"} ${c.x.toFixed(1)} ${c.y.toFixed(1)}`).join(" ");
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="health-chart-svg" preserveAspectRatio="none">
+      <path d={path} fill="none" stroke={color} strokeWidth="2" />
+      {coords.map((c, i) => (
+        <circle key={i} cx={c.x} cy={c.y} r="2.5" fill={color}>
+          <title>{`${c.date}: ${formatValue ? formatValue(c.value) : c.value}`}</title>
+        </circle>
+      ))}
+    </svg>
+  );
+}
+
+function ChartCard({ title, points, unit }) {
+  const hasData = points.some((p) => p.value !== null && p.value !== undefined && p.value !== 0);
+  return (
+    <div className="health-card" data-testid={`chart-${title}`}>
+      <h3>{title}</h3>
+      {hasData ? (
+        <LineChart points={points} formatValue={(v) => `${v}${unit || ""}`} />
+      ) : (
+        <div className="health-chart-empty">Sem dados ainda</div>
+      )}
+    </div>
+  );
+}
+
 function QuickForm({ testId, placeholder, buttonLabel, onSubmit, type = "number", step = "1" }) {
   const [val, setVal] = useState("");
   const [busy, setBusy] = useState(false);
@@ -192,6 +230,13 @@ export default function HealthView({ toast }) {
             <button className="btn btn-primary btn-sm" type="submit">Adicionar</button>
           </form>
         </div>
+      </div>
+
+      <div className="health-charts">
+        <ChartCard title="Água (L)" unit=" L" points={history.map((d) => ({ date: d.date.slice(5), value: d.water_l }))} />
+        <ChartCard title="Distância (km)" unit=" km" points={history.map((d) => ({ date: d.date.slice(5), value: d.km }))} />
+        <ChartCard title="Kcal (in vs out)" unit=" kcal" points={history.map((d) => ({ date: d.date.slice(5), value: d.kcal_in }))} />
+        <ChartCard title="BPM médio" points={history.map((d) => ({ date: d.date.slice(5), value: d.avg_bpm }))} />
       </div>
 
       <div className="health-history">
