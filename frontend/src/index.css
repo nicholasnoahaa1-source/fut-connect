@@ -247,6 +247,8 @@ input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 
 .health-stat-value { font-family: 'Anton', sans-serif; font-size: 1.35rem; color: var(--gold); }
 .health-stat-unit { font-size: .75rem; color: var(--text-dim); margin-left: 2px; }
 .health-stat-label { font-size: .72rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .06em; }
+.health-goal-bar { margin-top: .4rem; height: 5px; border-radius: 100px; background: var(--line); overflow: hidden; }
+.health-goal-bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--gold), #ffce6b); transition: width .3s; }
 .health-forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .8rem; margin-bottom: 1.5rem; }
 .health-card { background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: 1rem; }
 .health-card h3 { font-size: .85rem; margin: 0 0 .6rem; color: var(--text); }

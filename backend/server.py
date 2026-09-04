@@ -290,6 +290,13 @@ class DeviceSyncPayload(BaseModel):
     device_name: Optional[str] = "Smartwatch"
 
 
+class HealthGoalsPayload(BaseModel):
+    water_l: Optional[float] = None
+    kcal_in: Optional[float] = None
+    protein_g: Optional[float] = None
+    km: Optional[float] = None
+
+
 # ---------- Auth helpers (email/password) ----------
 def hash_password(pw: str) -> str:
     return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -1090,6 +1097,34 @@ async def device_sync(p: DeviceSyncPayload, user=Depends(get_user_from_session))
     return {"synced": saved}
 
 
+DEFAULT_HEALTH_GOALS = {"water_l": 2.5, "kcal_in": 2000.0, "protein_g": 100.0, "km": 5.0}
+
+
+async def get_health_goals(user_id: str) -> Dict[str, float]:
+    doc = await db.health_goals.find_one({"user_id": user_id}, {"_id": 0})
+    goals = dict(DEFAULT_HEALTH_GOALS)
+    if doc:
+        goals.update({k: v for k, v in doc.items() if k in DEFAULT_HEALTH_GOALS and v is not None})
+    return goals
+
+
+@api.get("/health/goals")
+async def read_health_goals(user=Depends(get_user_from_session)):
+    return await get_health_goals(user["user_id"])
+
+
+@api.put("/health/goals")
+async def update_health_goals(p: HealthGoalsPayload, user=Depends(get_user_from_session)):
+    update = {k: v for k, v in p.model_dump().items() if v is not None}
+    if not update:
+        raise HTTPException(400, "Nenhuma meta enviada")
+    for v in update.values():
+        if v < 0:
+            raise HTTPException(400, "Valor inválido")
+    await db.health_goals.update_one({"user_id": user["user_id"]}, {"$set": update}, upsert=True)
+    return await get_health_goals(user["user_id"])
+
+
 @api.get("/health/today")
 async def health_today(user=Depends(get_user_from_session)):
     date = today_str()
@@ -1106,6 +1141,7 @@ async def health_today(user=Depends(get_user_from_session)):
     bpm_readings = [l["bpm"] for l in logs if l["type"] == "bpm"]
     last_bpm = bpm_readings[-1] if bpm_readings else None
     avg_bpm = round(sum(bpm_readings) / len(bpm_readings), 1) if bpm_readings else None
+    goals = await get_health_goals(user["user_id"])
 
     return {
         "date": date,
@@ -1118,6 +1154,7 @@ async def health_today(user=Depends(get_user_from_session)):
         "last_bpm": last_bpm,
         "avg_bpm": avg_bpm,
         "bpm_count": len(bpm_readings),
+        "goals": goals,
         "logs": list(reversed(logs))[:50],
     }
 

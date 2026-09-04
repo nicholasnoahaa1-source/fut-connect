@@ -5,13 +5,19 @@ const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 const api = axios.create({ baseURL: API, withCredentials: true });
 
-function Stat({ label, value, unit, icon }) {
+function Stat({ label, value, unit, icon, goal }) {
+  const pct = goal ? Math.max(0, Math.min(100, Math.round((Number(value) / goal) * 100))) : null;
   return (
     <div className="health-stat" data-testid={`health-stat-${label}`}>
       <div className="health-stat-icon">{icon}</div>
-      <div>
+      <div style={{ flex: 1 }}>
         <div className="health-stat-value">{value}<span className="health-stat-unit">{unit}</span></div>
         <div className="health-stat-label">{label}</div>
+        {pct !== null && (
+          <div className="health-goal-bar" title={`${pct}% da meta (${goal}${unit})`}>
+            <i style={{ width: `${pct}%` }} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -99,24 +105,63 @@ export default function HealthView({ toast }) {
     setMealKcal(""); setMealProtein(""); setMealLabel("");
   };
 
+  const [editingGoals, setEditingGoals] = useState(false);
+  const [goalForm, setGoalForm] = useState(null);
+
+  const openGoals = () => {
+    setGoalForm({ ...today.goals });
+    setEditingGoals(true);
+  };
+
+  const saveGoals = async (e) => {
+    e.preventDefault();
+    await api.put("/health/goals", {
+      water_l: Number(goalForm.water_l) || 0,
+      kcal_in: Number(goalForm.kcal_in) || 0,
+      protein_g: Number(goalForm.protein_g) || 0,
+      km: Number(goalForm.km) || 0,
+    });
+    setEditingGoals(false);
+    ok("Metas atualizadas 🎯");
+    load();
+  };
+
   if (loading) return <div className="shell"><div className="card-auth"><h1 className="display">Carregando…</h1></div></div>;
 
   const balance = (today.kcal_in - today.kcal_out).toFixed(0);
+  const goals = today.goals || {};
 
   return (
     <div className="health-view" data-testid="health-view">
       <div className="health-header">
         <h1 className="display">Minha Saúde</h1>
-        <button className="btn btn-gold btn-sm" onClick={connectWatch} data-testid="connect-watch-btn">⌚ Conectar relógio</button>
+        <div style={{ display: "flex", gap: ".5rem" }}>
+          <button className="btn btn-ghost btn-sm" onClick={openGoals} data-testid="edit-goals-btn">🎯 Metas</button>
+          <button className="btn btn-gold btn-sm" onClick={connectWatch} data-testid="connect-watch-btn">⌚ Conectar relógio</button>
+        </div>
       </div>
 
+      {editingGoals && goalForm && (
+        <form className="health-card" onSubmit={saveGoals} data-testid="form-goals" style={{ marginBottom: "1.2rem" }}>
+          <h3>Metas diárias</h3>
+          <div className="health-quickform">
+            <input className="health-input" type="number" min="0" step="0.1" placeholder="Água (L)" value={goalForm.water_l} onChange={(e) => setGoalForm({ ...goalForm, water_l: e.target.value })} />
+            <input className="health-input" type="number" min="0" placeholder="Kcal" value={goalForm.kcal_in} onChange={(e) => setGoalForm({ ...goalForm, kcal_in: e.target.value })} />
+            <input className="health-input" type="number" min="0" placeholder="Proteína (g)" value={goalForm.protein_g} onChange={(e) => setGoalForm({ ...goalForm, protein_g: e.target.value })} />
+            <input className="health-input" type="number" min="0" step="0.1" placeholder="Km" value={goalForm.km} onChange={(e) => setGoalForm({ ...goalForm, km: e.target.value })} />
+            <button className="btn btn-primary btn-sm" type="submit">Salvar</button>
+            <button className="btn btn-ghost btn-sm" type="button" onClick={() => setEditingGoals(false)}>Cancelar</button>
+          </div>
+        </form>
+      )}
+
       <div className="health-grid">
-        <Stat label="Água" value={today.water_l} unit=" L" icon="💧" />
+        <Stat label="Água" value={today.water_l} unit=" L" icon="💧" goal={goals.water_l} />
         <Stat label="BPM atual" value={today.last_bpm ?? "-"} unit="" icon="❤️" />
-        <Stat label="Distância" value={today.km} unit=" km" icon="🚶" />
+        <Stat label="Distância" value={today.km} unit=" km" icon="🚶" goal={goals.km} />
         <Stat label="Passos" value={today.steps} unit="" icon="👣" />
-        <Stat label="Proteína" value={today.protein_g} unit=" g" icon="🥩" />
-        <Stat label="Kcal consumida" value={today.kcal_in} unit=" kcal" icon="🍽️" />
+        <Stat label="Proteína" value={today.protein_g} unit=" g" icon="🥩" goal={goals.protein_g} />
+        <Stat label="Kcal consumida" value={today.kcal_in} unit=" kcal" icon="🍽️" goal={goals.kcal_in} />
         <Stat label="Kcal perdida" value={today.kcal_out} unit=" kcal" icon="🔥" />
         <Stat label="Balanço calórico" value={balance} unit=" kcal" icon="⚖️" />
       </div>
