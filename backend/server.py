@@ -256,6 +256,40 @@ class AIAnalyzePayload(BaseModel):
     focus: Optional[str] = None  # ex: "atacante explosivo"
 
 
+class WaterPayload(BaseModel):
+    liters: float
+
+
+class BpmPayload(BaseModel):
+    bpm: int
+    source: Optional[str] = "manual"  # "manual" | "device"
+
+
+class ActivityPayload(BaseModel):
+    km: float
+    steps: Optional[int] = None
+    source: Optional[str] = "manual"
+
+
+class NutritionPayload(BaseModel):
+    label: Optional[str] = None
+    protein_g: float = 0
+    kcal: float = 0
+
+
+class BurnedPayload(BaseModel):
+    kcal: float
+    source: Optional[str] = "manual"
+
+
+class DeviceSyncPayload(BaseModel):
+    bpm: Optional[int] = None
+    kcal_burned: Optional[float] = None
+    km: Optional[float] = None
+    steps: Optional[int] = None
+    device_name: Optional[str] = "Smartwatch"
+
+
 # ---------- Auth helpers (email/password) ----------
 def hash_password(pw: str) -> str:
     return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -983,6 +1017,162 @@ async def ai_recommend(p: AIRecommendPayload, user=Depends(get_user_from_session
         prompt,
     )
     return {"recommendation": text, "candidates": top}
+
+
+# ---------- Health tracking ----------
+def today_str() -> str:
+    return now_utc().date().isoformat()
+
+
+async def add_health_log(user_id: str, log_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    doc = {
+        "id": gen_id("hlog"),
+        "user_id": user_id,
+        "type": log_type,
+        "date": today_str(),
+        "created_at": now_utc().isoformat(),
+        **data,
+    }
+    await db.health_logs.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.post("/health/water")
+async def log_water(p: WaterPayload, user=Depends(get_user_from_session)):
+    if p.liters <= 0:
+        raise HTTPException(400, "Valor inválido")
+    return await add_health_log(user["user_id"], "water", {"liters": p.liters})
+
+
+@api.post("/health/bpm")
+async def log_bpm(p: BpmPayload, user=Depends(get_user_from_session)):
+    if p.bpm <= 0 or p.bpm > 300:
+        raise HTTPException(400, "BPM inválido")
+    return await add_health_log(user["user_id"], "bpm", {"bpm": p.bpm, "source": p.source})
+
+
+@api.post("/health/activity")
+async def log_activity(p: ActivityPayload, user=Depends(get_user_from_session)):
+    if p.km < 0:
+        raise HTTPException(400, "Valor inválido")
+    return await add_health_log(user["user_id"], "activity", {"km": p.km, "steps": p.steps, "source": p.source})
+
+
+@api.post("/health/nutrition")
+async def log_nutrition(p: NutritionPayload, user=Depends(get_user_from_session)):
+    if p.protein_g < 0 or p.kcal < 0:
+        raise HTTPException(400, "Valor inválido")
+    return await add_health_log(
+        user["user_id"], "nutrition", {"label": p.label, "protein_g": p.protein_g, "kcal": p.kcal}
+    )
+
+
+@api.post("/health/burned")
+async def log_burned(p: BurnedPayload, user=Depends(get_user_from_session)):
+    if p.kcal < 0:
+        raise HTTPException(400, "Valor inválido")
+    return await add_health_log(user["user_id"], "burned", {"kcal": p.kcal, "source": p.source})
+
+
+@api.post("/health/device-sync")
+async def device_sync(p: DeviceSyncPayload, user=Depends(get_user_from_session)):
+    """Simula a conexão com um relógio/smartband: recebe leituras e registra como logs com source=device."""
+    saved = []
+    if p.bpm is not None:
+        saved.append(await add_health_log(user["user_id"], "bpm", {"bpm": p.bpm, "source": "device", "device": p.device_name}))
+    if p.kcal_burned is not None:
+        saved.append(await add_health_log(user["user_id"], "burned", {"kcal": p.kcal_burned, "source": "device", "device": p.device_name}))
+    if p.km is not None:
+        saved.append(await add_health_log(user["user_id"], "activity", {"km": p.km, "steps": p.steps, "source": "device", "device": p.device_name}))
+    if not saved:
+        raise HTTPException(400, "Nenhuma leitura enviada")
+    return {"synced": saved}
+
+
+@api.get("/health/today")
+async def health_today(user=Depends(get_user_from_session)):
+    date = today_str()
+    logs = await db.health_logs.find(
+        {"user_id": user["user_id"], "date": date}, {"_id": 0}
+    ).sort("created_at", 1).to_list(2000)
+
+    water_l = sum(l["liters"] for l in logs if l["type"] == "water")
+    km = sum(l["km"] for l in logs if l["type"] == "activity")
+    steps = sum((l.get("steps") or 0) for l in logs if l["type"] == "activity")
+    protein_g = sum(l["protein_g"] for l in logs if l["type"] == "nutrition")
+    kcal_in = sum(l["kcal"] for l in logs if l["type"] == "nutrition")
+    kcal_out = sum(l["kcal"] for l in logs if l["type"] == "burned")
+    bpm_readings = [l["bpm"] for l in logs if l["type"] == "bpm"]
+    last_bpm = bpm_readings[-1] if bpm_readings else None
+    avg_bpm = round(sum(bpm_readings) / len(bpm_readings), 1) if bpm_readings else None
+
+    return {
+        "date": date,
+        "water_l": round(water_l, 2),
+        "km": round(km, 2),
+        "steps": steps,
+        "protein_g": round(protein_g, 1),
+        "kcal_in": round(kcal_in, 1),
+        "kcal_out": round(kcal_out, 1),
+        "last_bpm": last_bpm,
+        "avg_bpm": avg_bpm,
+        "bpm_count": len(bpm_readings),
+        "logs": list(reversed(logs))[:50],
+    }
+
+
+@api.get("/health/history")
+async def health_history(days: int = 7, user=Depends(get_user_from_session)):
+    days = max(1, min(days, 30))
+    start_date = (now_utc().date() - timedelta(days=days - 1)).isoformat()
+    logs = await db.health_logs.find(
+        {"user_id": user["user_id"], "date": {"$gte": start_date}}, {"_id": 0}
+    ).to_list(5000)
+
+    by_day: Dict[str, Dict[str, Any]] = {}
+    for i in range(days):
+        d = (now_utc().date() - timedelta(days=days - 1 - i)).isoformat()
+        by_day[d] = {"date": d, "water_l": 0.0, "km": 0.0, "protein_g": 0.0, "kcal_in": 0.0, "kcal_out": 0.0, "bpm_sum": 0, "bpm_n": 0}
+
+    for l in logs:
+        d = by_day.get(l["date"])
+        if not d:
+            continue
+        if l["type"] == "water":
+            d["water_l"] += l["liters"]
+        elif l["type"] == "activity":
+            d["km"] += l["km"]
+        elif l["type"] == "nutrition":
+            d["protein_g"] += l["protein_g"]
+            d["kcal_in"] += l["kcal"]
+        elif l["type"] == "burned":
+            d["kcal_out"] += l["kcal"]
+        elif l["type"] == "bpm":
+            d["bpm_sum"] += l["bpm"]
+            d["bpm_n"] += 1
+
+    result = []
+    for d in by_day.values():
+        avg_bpm = round(d["bpm_sum"] / d["bpm_n"], 1) if d["bpm_n"] else None
+        result.append({
+            "date": d["date"],
+            "water_l": round(d["water_l"], 2),
+            "km": round(d["km"], 2),
+            "protein_g": round(d["protein_g"], 1),
+            "kcal_in": round(d["kcal_in"], 1),
+            "kcal_out": round(d["kcal_out"], 1),
+            "avg_bpm": avg_bpm,
+        })
+    return {"days": result}
+
+
+@api.delete("/health/logs/{log_id}")
+async def delete_health_log(log_id: str, user=Depends(get_user_from_session)):
+    res = await db.health_logs.delete_one({"id": log_id, "user_id": user["user_id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Registro não encontrado")
+    return {"ok": True}
 
 
 # ---------- Mount ----------

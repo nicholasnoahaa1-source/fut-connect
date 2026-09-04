@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { BrowserRouter, Routes, Route, useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 import "@/App.css";
+import HealthView from "@/pages/Health";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -60,7 +61,7 @@ function ToastProvider({ children }) {
 }
 
 // ===== Topbar =====
-function Topbar({ user, onLogout, onGoOpps, onGoChat, unread }) {
+function Topbar({ user, onLogout, onGoOpps, onGoChat, onGoHealth, unread }) {
   return (
     <div className="topbar">
       <div className="topbar-in">
@@ -75,6 +76,7 @@ function Topbar({ user, onLogout, onGoOpps, onGoChat, unread }) {
                 {unread > 0 && <span style={{ position: "absolute", top: -4, right: -4, background: "var(--gold)", color: "#1a1205", borderRadius: "100px", fontSize: ".64rem", fontWeight: 800, padding: "2px 6px", lineHeight: 1 }} data-testid="chat-unread-badge">{unread}</span>}
               </button>
               <button className="btn btn-ghost btn-sm" onClick={onGoOpps} data-testid="nav-opps-btn">Oportunidades</button>
+              {onGoHealth && <button className="btn btn-ghost btn-sm" onClick={onGoHealth} data-testid="nav-health-btn">Saúde</button>}
               <button className="btn btn-ghost btn-sm" onClick={onLogout} data-testid="logout-btn">Sair</button>
             </>
           )}
@@ -1206,6 +1208,7 @@ function Dashboard() {
   const openCv = (id) => { setCvId(id); setPage("cv"); window.scrollTo(0, 0); };
   const openOpps = () => { setPage("opps"); window.scrollTo(0, 0); };
   const openChat = (otherId = null) => { setChatOpenId(otherId); setPage("chat"); window.scrollTo(0, 0); };
+  const openHealth = () => { setPage("health"); window.scrollTo(0, 0); };
   const backHome = () => { setPage("home"); window.scrollTo(0, 0); };
 
   if (loading) return <div className="shell"><div className="card-auth"><h1 className="display">Carregando…</h1></div></div>;
@@ -1214,12 +1217,18 @@ function Dashboard() {
 
   return (
     <>
-      <Topbar user={user} onLogout={logout} onGoOpps={openOpps} onGoChat={() => openChat()} unread={unread} />
+      <Topbar user={user} onLogout={logout} onGoOpps={openOpps} onGoChat={() => openChat()} onGoHealth={openHealth} unread={unread} />
       {page === "home" && user.role === "atleta" && <AthleteView user={user} toast={toast} onOpenCv={openCv} />}
       {page === "home" && user.role === "tecnico" && <CoachView user={user} toast={toast} onOpenCv={openCv} />}
       {page === "cv" && <CvView athleteId={cvId} viewer={user} toast={toast} onBack={backHome} onOpenChat={openChat} />}
       {page === "opps" && <OppsView user={user} toast={toast} onBack={backHome} />}
       {page === "chat" && <ChatView user={user} toast={toast} initialOtherId={chatOpenId} onBack={backHome} />}
+      {page === "health" && (
+        <div className="shell">
+          <button className="btn btn-ghost btn-sm" onClick={backHome} style={{ marginBottom: 16 }}>← Voltar</button>
+          <HealthView toast={toast} />
+        </div>
+      )}
     </>
   );
 }
