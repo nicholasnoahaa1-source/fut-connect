@@ -95,18 +95,22 @@ export default function HealthView({ toast }) {
   const [today, setToday] = useState(null);
   const [history, setHistory] = useState([]);
   const [weightHistory, setWeightHistory] = useState([]);
+  const [fitbit, setFitbit] = useState({ configured: false, connected: false });
+  const [fitbitBusy, setFitbitBusy] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     try {
-      const [t, h, w] = await Promise.all([
+      const [t, h, w, f] = await Promise.all([
         api.get("/health/today"),
         api.get("/health/history?days=7"),
         api.get("/health/weight/history?days=30"),
+        api.get("/health/fitbit/status"),
       ]);
       setToday(t.data);
       setHistory(h.data.days);
       setWeightHistory(w.data.entries);
+      setFitbit(f.data);
     } catch (e) {
       toast?.("Erro ao carregar dados de saúde");
     }
@@ -114,6 +118,18 @@ export default function HealthView({ toast }) {
   }, [toast]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("fitbit");
+    if (!status) return;
+    if (status === "connected") toast?.("Fitbit conectado! 🎉");
+    if (status === "error") toast?.("Não foi possível conectar ao Fitbit");
+    params.delete("fitbit");
+    const q = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (q ? `?${q}` : ""));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const ok = (msg) => toast?.(msg);
 
@@ -133,6 +149,33 @@ export default function HealthView({ toast }) {
     const kcal_burned = Math.round(50 + Math.random() * 250);
     await api.post("/health/device-sync", { bpm, kcal_burned, device_name: "Smartwatch" });
     ok(`Relógio sincronizado: ${bpm} bpm, ${kcal_burned} kcal`);
+    load();
+  };
+
+  const connectFitbit = async () => {
+    try {
+      const { data } = await api.get("/health/fitbit/connect");
+      window.location.href = data.url;
+    } catch (e) {
+      ok(e.response?.data?.detail || "Erro ao iniciar conexão com Fitbit");
+    }
+  };
+
+  const syncFitbit = async () => {
+    setFitbitBusy(true);
+    try {
+      const { data } = await api.post("/health/fitbit/sync");
+      ok(data.synced?.length ? "Fitbit sincronizado ⌚" : (data.message || "Nada novo do Fitbit"));
+      load();
+    } catch (e) {
+      ok(e.response?.data?.detail || "Erro ao sincronizar com o Fitbit");
+    }
+    setFitbitBusy(false);
+  };
+
+  const disconnectFitbit = async () => {
+    await api.post("/health/fitbit/disconnect");
+    ok("Fitbit desconectado");
     load();
   };
 
@@ -179,8 +222,33 @@ export default function HealthView({ toast }) {
         <h1 className="display">Minha Saúde</h1>
         <div style={{ display: "flex", gap: ".5rem" }}>
           <button className="btn btn-ghost btn-sm" onClick={openGoals} data-testid="edit-goals-btn">🎯 Metas</button>
-          <button className="btn btn-gold btn-sm" onClick={connectWatch} data-testid="connect-watch-btn">⌚ Conectar relógio</button>
+          <button className="btn btn-gold btn-sm" onClick={connectWatch} data-testid="connect-watch-btn">⌚ Simular relógio</button>
         </div>
+      </div>
+
+      <div className="health-card" data-testid="fitbit-card" style={{ marginBottom: "1.2rem" }}>
+        <h3>⌚ Fitbit</h3>
+        {!fitbit.configured && (
+          <p style={{ color: "var(--text-dim)", fontSize: ".85rem" }}>
+            Integração ainda não configurada no servidor (faltam credenciais do Fitbit).
+          </p>
+        )}
+        {fitbit.configured && !fitbit.connected && (
+          <button className="btn btn-primary btn-sm" onClick={connectFitbit} data-testid="fitbit-connect-btn">
+            Conectar minha conta Fitbit
+          </button>
+        )}
+        {fitbit.configured && fitbit.connected && (
+          <div style={{ display: "flex", gap: ".5rem", alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ color: "var(--gold)", fontSize: ".85rem" }}>✓ Conectado</span>
+            <button className="btn btn-gold btn-sm" onClick={syncFitbit} disabled={fitbitBusy} data-testid="fitbit-sync-btn">
+              {fitbitBusy ? "Sincronizando…" : "Sincronizar agora"}
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={disconnectFitbit} data-testid="fitbit-disconnect-btn">
+              Desconectar
+            </button>
+          </div>
+        )}
       </div>
 
       {editingGoals && goalForm && (

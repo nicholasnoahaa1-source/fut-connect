@@ -33,6 +33,11 @@ mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
+FITBIT_CLIENT_ID = os.environ.get("FITBIT_CLIENT_ID", "")
+FITBIT_CLIENT_SECRET = os.environ.get("FITBIT_CLIENT_SECRET", "")
+FITBIT_REDIRECT_URI = os.environ.get("FITBIT_REDIRECT_URI", "")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "")
+
 logger = logging.getLogger("futconnect")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -1116,6 +1121,172 @@ async def device_sync(p: DeviceSyncPayload, user=Depends(get_user_from_session))
         saved.append(await add_health_log(user["user_id"], "activity", {"km": p.km, "steps": p.steps, "source": "device", "device": p.device_name}))
     if not saved:
         raise HTTPException(400, "Nenhuma leitura enviada")
+    return {"synced": saved}
+
+
+# ---------- Fitbit OAuth2 integration ----------
+FITBIT_AUTH_URL = "https://www.fitbit.com/oauth2/authorize"
+FITBIT_TOKEN_URL = "https://api.fitbit.com/oauth2/token"
+FITBIT_SCOPES = "activity heartrate profile"
+
+
+def fitbit_configured() -> bool:
+    return bool(FITBIT_CLIENT_ID and FITBIT_CLIENT_SECRET and FITBIT_REDIRECT_URI)
+
+
+async def get_fitbit_tokens(user_id: str) -> Optional[Dict[str, Any]]:
+    return await db.fitbit_tokens.find_one({"user_id": user_id}, {"_id": 0})
+
+
+async def fitbit_refresh_if_needed(tokens: Dict[str, Any]) -> Dict[str, Any]:
+    expires_at = datetime.fromisoformat(tokens["expires_at"])
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at > now_utc() + timedelta(minutes=1):
+        return tokens
+    auth = base64_basic_auth(FITBIT_CLIENT_ID, FITBIT_CLIENT_SECRET)
+    async with httpx.AsyncClient(timeout=15.0) as cli:
+        resp = await cli.post(
+            FITBIT_TOKEN_URL,
+            headers={"Authorization": f"Basic {auth}", "Content-Type": "application/x-www-form-urlencoded"},
+            data={"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(401, "Não foi possível renovar a conexão com o Fitbit. Reconecte.")
+    data = resp.json()
+    new_tokens = {
+        "user_id": tokens["user_id"],
+        "access_token": data["access_token"],
+        "refresh_token": data.get("refresh_token", tokens["refresh_token"]),
+        "expires_at": (now_utc() + timedelta(seconds=data["expires_in"])).isoformat(),
+        "fitbit_user_id": tokens.get("fitbit_user_id"),
+    }
+    await db.fitbit_tokens.update_one({"user_id": tokens["user_id"]}, {"$set": new_tokens}, upsert=True)
+    return new_tokens
+
+
+def base64_basic_auth(client_id: str, client_secret: str) -> str:
+    import base64
+    return base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+
+
+@api.get("/health/fitbit/status")
+async def fitbit_status(user=Depends(get_user_from_session)):
+    if not fitbit_configured():
+        return {"configured": False, "connected": False}
+    tokens = await get_fitbit_tokens(user["user_id"])
+    return {"configured": True, "connected": tokens is not None}
+
+
+@api.get("/health/fitbit/connect")
+async def fitbit_connect(user=Depends(get_user_from_session)):
+    if not fitbit_configured():
+        raise HTTPException(400, "Integração Fitbit não configurada no servidor (faltam credenciais)")
+    state = secrets.token_urlsafe(24)
+    await db.oauth_states.insert_one(
+        {"state": state, "user_id": user["user_id"], "provider": "fitbit", "created_at": now_utc().isoformat()}
+    )
+    params = {
+        "response_type": "code",
+        "client_id": FITBIT_CLIENT_ID,
+        "redirect_uri": FITBIT_REDIRECT_URI,
+        "scope": FITBIT_SCOPES,
+        "state": state,
+    }
+    url = f"{FITBIT_AUTH_URL}?{httpx.QueryParams(params)}"
+    return {"url": url}
+
+
+@api.get("/health/fitbit/callback")
+async def fitbit_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    dest = f"{FRONTEND_URL}/dashboard" if FRONTEND_URL else "/dashboard"
+    if error or not code or not state:
+        return JSONResponse(status_code=302, headers={"Location": f"{dest}?fitbit=error"}, content=None)
+    state_doc = await db.oauth_states.find_one({"state": state, "provider": "fitbit"}, {"_id": 0})
+    if not state_doc:
+        return JSONResponse(status_code=302, headers={"Location": f"{dest}?fitbit=error"}, content=None)
+    await db.oauth_states.delete_one({"state": state})
+    user_id = state_doc["user_id"]
+
+    auth = base64_basic_auth(FITBIT_CLIENT_ID, FITBIT_CLIENT_SECRET)
+    async with httpx.AsyncClient(timeout=15.0) as cli:
+        resp = await cli.post(
+            FITBIT_TOKEN_URL,
+            headers={"Authorization": f"Basic {auth}", "Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "client_id": FITBIT_CLIENT_ID,
+                "grant_type": "authorization_code",
+                "redirect_uri": FITBIT_REDIRECT_URI,
+                "code": code,
+            },
+        )
+    if resp.status_code != 200:
+        logger.error("Fitbit token exchange failed: %s", resp.text)
+        return JSONResponse(status_code=302, headers={"Location": f"{dest}?fitbit=error"}, content=None)
+
+    data = resp.json()
+    await db.fitbit_tokens.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "user_id": user_id,
+                "access_token": data["access_token"],
+                "refresh_token": data["refresh_token"],
+                "expires_at": (now_utc() + timedelta(seconds=data["expires_in"])).isoformat(),
+                "fitbit_user_id": data.get("user_id"),
+            }
+        },
+        upsert=True,
+    )
+    return JSONResponse(status_code=302, headers={"Location": f"{dest}?fitbit=connected"}, content=None)
+
+
+@api.post("/health/fitbit/disconnect")
+async def fitbit_disconnect(user=Depends(get_user_from_session)):
+    await db.fitbit_tokens.delete_one({"user_id": user["user_id"]})
+    return {"ok": True}
+
+
+@api.post("/health/fitbit/sync")
+async def fitbit_sync(user=Depends(get_user_from_session)):
+    tokens = await get_fitbit_tokens(user["user_id"])
+    if not tokens:
+        raise HTTPException(400, "Fitbit não conectado")
+    tokens = await fitbit_refresh_if_needed(tokens)
+    date = today_str()
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    async with httpx.AsyncClient(timeout=15.0) as cli:
+        activity_resp = await cli.get(f"https://api.fitbit.com/1/user/-/activities/date/{date}.json", headers=headers)
+        heart_resp = await cli.get(f"https://api.fitbit.com/1/user/-/activities/heart/date/{date}/1d.json", headers=headers)
+
+    if activity_resp.status_code == 401 or heart_resp.status_code == 401:
+        raise HTTPException(401, "Sessão do Fitbit expirada. Reconecte.")
+    if activity_resp.status_code != 200:
+        raise HTTPException(502, "Erro ao consultar atividade no Fitbit")
+
+    activity = activity_resp.json().get("summary", {})
+    saved = []
+    kcal_out = activity.get("caloriesOut")
+    if kcal_out is not None:
+        saved.append(await add_health_log(user["user_id"], "burned", {"kcal": float(kcal_out), "source": "fitbit"}))
+    steps = activity.get("steps")
+    distance_km = next(
+        (d["distance"] for d in activity.get("distances", []) if d.get("activity") == "total"), None
+    )
+    if steps is not None or distance_km is not None:
+        saved.append(
+            await add_health_log(
+                user["user_id"], "activity", {"km": float(distance_km or 0), "steps": steps, "source": "fitbit"}
+            )
+        )
+    if heart_resp.status_code == 200:
+        heart = heart_resp.json().get("activities-heart", [])
+        resting_bpm = heart[0].get("value", {}).get("restingHeartRate") if heart else None
+        if resting_bpm is not None:
+            saved.append(await add_health_log(user["user_id"], "bpm", {"bpm": int(resting_bpm), "source": "fitbit"}))
+
+    if not saved:
+        return {"synced": [], "message": "Nenhum dado novo do Fitbit para hoje"}
     return {"synced": saved}
 
 
