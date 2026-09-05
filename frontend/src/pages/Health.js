@@ -95,6 +95,7 @@ export default function HealthView({ toast }) {
   const [today, setToday] = useState(null);
   const [history, setHistory] = useState([]);
   const [weightHistory, setWeightHistory] = useState([]);
+  const [sleepHistory, setSleepHistory] = useState([]);
   const [fitbit, setFitbit] = useState({ configured: false, connected: false });
   const [fitbitBusy, setFitbitBusy] = useState(false);
   const [strava, setStrava] = useState({ configured: false, connected: false });
@@ -103,16 +104,18 @@ export default function HealthView({ toast }) {
 
   const load = useCallback(async () => {
     try {
-      const [t, h, w, f, s] = await Promise.all([
+      const [t, h, w, sl, f, s] = await Promise.all([
         api.get("/health/today"),
         api.get("/health/history?days=7"),
         api.get("/health/weight/history?days=30"),
+        api.get("/health/sleep/history?days=14"),
         api.get("/health/fitbit/status"),
         api.get("/health/strava/status"),
       ]);
       setToday(t.data);
       setHistory(h.data.days);
       setWeightHistory(w.data.entries);
+      setSleepHistory(sl.data.entries);
       setFitbit(f.data);
       setStrava(s.data);
     } catch (e) {
@@ -146,6 +149,7 @@ export default function HealthView({ toast }) {
   const addActivity = async (km) => { await api.post("/health/activity", { km, source: "manual" }); ok("Caminhada registrada 🚶"); load(); };
   const addBurned = async (kcal) => { await api.post("/health/burned", { kcal, source: "manual" }); ok("Kcal perdida registrada 🔥"); load(); };
   const addWeight = async (kg) => { await api.post("/health/weight", { kg }); ok("Peso registrado ⚖️"); load(); };
+  const addSleep = async (hours, quality) => { await api.post("/health/sleep", { hours, quality }); ok("Sono registrado 😴"); load(); };
   const addNutrition = async (kcal, protein_g, label) => {
     await api.post("/health/nutrition", { kcal, protein_g, label });
     ok("Refeição registrada 🍽️"); load();
@@ -275,6 +279,16 @@ export default function HealthView({ toast }) {
     if (mealKcal === "") return;
     await addNutrition(Number(mealKcal) || 0, Number(mealProtein) || 0, mealLabel || undefined);
     setMealKcal(""); setMealProtein(""); setMealLabel("");
+  };
+
+  const [sleepHours, setSleepHours] = useState("");
+  const [sleepQuality, setSleepQuality] = useState("");
+
+  const submitSleep = async (e) => {
+    e.preventDefault();
+    if (sleepHours === "") return;
+    await addSleep(Number(sleepHours), sleepQuality || undefined);
+    setSleepHours(""); setSleepQuality("");
   };
 
   const [editingGoals, setEditingGoals] = useState(false);
@@ -422,6 +436,7 @@ export default function HealthView({ toast }) {
         <Stat label="Kcal consumida" value={today.kcal_in} unit=" kcal" icon="🍽️" goal={goals.kcal_in} />
         <Stat label="Kcal perdida" value={today.kcal_out} unit=" kcal" icon="🔥" />
         <Stat label="Balanço calórico" value={balance} unit=" kcal" icon="⚖️" />
+        <Stat label="Sono (última noite)" value={today.sleep_hours ?? "-"} unit={today.sleep_hours != null ? " h" : ""} icon="😴" />
       </div>
 
       <div className="health-forms">
@@ -454,6 +469,20 @@ export default function HealthView({ toast }) {
             <button className="btn btn-primary btn-sm" type="submit">Adicionar</button>
           </form>
         </div>
+        <div className="health-card">
+          <h3>Sono (última noite)</h3>
+          <form className="health-quickform" onSubmit={submitSleep} data-testid="form-sleep">
+            <input className="health-input" type="number" min="0" step="0.5" placeholder="horas" value={sleepHours} onChange={(e) => setSleepHours(e.target.value)} />
+            <select className="health-input" value={sleepQuality} onChange={(e) => setSleepQuality(e.target.value)}>
+              <option value="">Qualidade?</option>
+              <option value="ruim">Ruim</option>
+              <option value="ok">Ok</option>
+              <option value="boa">Boa</option>
+              <option value="otima">Ótima</option>
+            </select>
+            <button className="btn btn-primary btn-sm" type="submit">Registrar</button>
+          </form>
+        </div>
       </div>
 
       <div className="health-charts">
@@ -462,6 +491,7 @@ export default function HealthView({ toast }) {
         <ChartCard title="Kcal (in vs out)" unit=" kcal" points={history.map((d) => ({ date: d.date.slice(5), value: d.kcal_in }))} />
         <ChartCard title="BPM médio" points={history.map((d) => ({ date: d.date.slice(5), value: d.avg_bpm }))} />
         <ChartCard title="Peso (kg) — 30 dias" unit=" kg" points={weightHistory.map((w) => ({ date: w.date.slice(5), value: w.kg }))} />
+        <ChartCard title="Sono (h) — 14 dias" unit=" h" points={sleepHistory.map((s) => ({ date: s.date.slice(5), value: s.hours }))} />
       </div>
 
       <div className="health-history">

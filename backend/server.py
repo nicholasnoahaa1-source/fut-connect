@@ -310,6 +310,11 @@ class WeightPayload(BaseModel):
     kg: float
 
 
+class SleepPayload(BaseModel):
+    hours: float
+    quality: Optional[str] = None  # "ruim" | "ok" | "boa" | "otima"
+
+
 # ---------- Auth helpers (email/password) ----------
 def hash_password(pw: str) -> str:
     return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -1113,6 +1118,24 @@ async def weight_history(days: int = 30, user=Depends(get_user_from_session)):
     return {"entries": [{"date": l["date"], "kg": l["kg"]} for l in logs]}
 
 
+@api.post("/health/sleep")
+async def log_sleep(p: SleepPayload, user=Depends(get_user_from_session)):
+    if p.hours < 0 or p.hours > 24:
+        raise HTTPException(400, "Valor inválido")
+    return await add_health_log(user["user_id"], "sleep", {"hours": p.hours, "quality": p.quality})
+
+
+@api.get("/health/sleep/history")
+async def sleep_history(days: int = 30, user=Depends(get_user_from_session)):
+    days = max(1, min(days, 365))
+    start_date = (now_utc().date() - timedelta(days=days - 1)).isoformat()
+    logs = await db.health_logs.find(
+        {"user_id": user["user_id"], "type": "sleep", "date": {"$gte": start_date}},
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(1000)
+    return {"entries": [{"date": l["date"], "hours": l["hours"], "quality": l.get("quality")} for l in logs]}
+
+
 @api.post("/health/device-sync")
 async def device_sync(p: DeviceSyncPayload, user=Depends(get_user_from_session)):
     """Simula a conexão com um relógio/smartband: recebe leituras e registra como logs com source=device."""
@@ -1501,6 +1524,8 @@ async def health_today(user=Depends(get_user_from_session)):
     bpm_readings = [l["bpm"] for l in logs if l["type"] == "bpm"]
     last_bpm = bpm_readings[-1] if bpm_readings else None
     avg_bpm = round(sum(bpm_readings) / len(bpm_readings), 1) if bpm_readings else None
+    sleep_readings = [l for l in logs if l["type"] == "sleep"]
+    last_sleep = sleep_readings[-1] if sleep_readings else None
     goals = await get_health_goals(user["user_id"])
 
     return {
@@ -1514,6 +1539,8 @@ async def health_today(user=Depends(get_user_from_session)):
         "last_bpm": last_bpm,
         "avg_bpm": avg_bpm,
         "bpm_count": len(bpm_readings),
+        "sleep_hours": last_sleep["hours"] if last_sleep else None,
+        "sleep_quality": last_sleep.get("quality") if last_sleep else None,
         "goals": goals,
         "logs": list(reversed(logs))[:50],
     }
