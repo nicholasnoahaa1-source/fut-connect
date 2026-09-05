@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -214,6 +214,58 @@ export default function HealthView({ toast }) {
     load();
   };
 
+  // ---- Pedômetro do celular (acelerômetro via DeviceMotion) ----
+  const [pedoSupported] = useState(typeof window !== "undefined" && "DeviceMotionEvent" in window);
+  const [pedoTracking, setPedoTracking] = useState(false);
+  const [pedoSteps, setPedoSteps] = useState(0);
+  const pedoStateRef = useRef({ lastMag: 9.8, lastStepAt: 0 });
+
+  const handleMotion = useCallback((e) => {
+    const acc = e.accelerationIncludingGravity;
+    if (!acc || acc.x == null) return;
+    const mag = Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+    const st = pedoStateRef.current;
+    const smoothed = st.lastMag * 0.9 + mag * 0.1;
+    const delta = mag - smoothed;
+    const now = Date.now();
+    if (delta > 3.5 && now - st.lastStepAt > 300) {
+      st.lastStepAt = now;
+      setPedoSteps((s) => s + 1);
+    }
+    st.lastMag = smoothed;
+  }, []);
+
+  useEffect(() => () => window.removeEventListener("devicemotion", handleMotion), [handleMotion]);
+
+  const startPedometer = async () => {
+    if (!pedoSupported) { ok("Seu navegador/celular não suporta o sensor de movimento"); return; }
+    if (typeof DeviceMotionEvent.requestPermission === "function") {
+      try {
+        const perm = await DeviceMotionEvent.requestPermission();
+        if (perm !== "granted") { ok("Permissão de movimento negada"); return; }
+      } catch (e) {
+        ok("Não foi possível pedir permissão de movimento");
+        return;
+      }
+    }
+    pedoStateRef.current = { lastMag: 9.8, lastStepAt: 0 };
+    setPedoSteps(0);
+    window.addEventListener("devicemotion", handleMotion);
+    setPedoTracking(true);
+    ok("Pedômetro ativado — deixe o celular no bolso e caminhe 🚶");
+  };
+
+  const stopPedometer = async (save) => {
+    window.removeEventListener("devicemotion", handleMotion);
+    setPedoTracking(false);
+    if (save && pedoSteps > 0) {
+      const km = Math.round(pedoSteps * 0.0007 * 100) / 100; // ~0,7m por passo
+      await api.post("/health/activity", { km, steps: pedoSteps, source: "phone" });
+      ok(`${pedoSteps} passos registrados 🚶`);
+      load();
+    }
+  };
+
   const [mealKcal, setMealKcal] = useState("");
   const [mealProtein, setMealProtein] = useState("");
   const [mealLabel, setMealLabel] = useState("");
@@ -308,6 +360,40 @@ export default function HealthView({ toast }) {
               <button className="btn btn-ghost btn-sm" onClick={disconnectStrava} data-testid="strava-disconnect-btn">
                 Desconectar
               </button>
+            </div>
+          )}
+        </div>
+
+        <div className="health-card" data-testid="pedometer-card">
+          <h3>📱 Pedômetro do celular</h3>
+          {!pedoSupported && (
+            <p style={{ color: "var(--text-dim)", fontSize: ".85rem" }}>
+              Sensor de movimento não disponível neste navegador.
+            </p>
+          )}
+          {pedoSupported && !pedoTracking && (
+            <>
+              <button className="btn btn-primary btn-sm" onClick={startPedometer} data-testid="pedometer-start-btn">
+                Iniciar caminhada
+              </button>
+              <p style={{ color: "var(--text-dim)", fontSize: ".78rem", marginTop: ".4rem" }}>
+                Deixe o celular no bolso/mão e caminhe. Ao terminar, toque em "Parar e salvar".
+              </p>
+            </>
+          )}
+          {pedoTracking && (
+            <div>
+              <div className="health-stat-value" style={{ marginBottom: ".4rem" }} data-testid="pedometer-live-count">
+                {pedoSteps}<span className="health-stat-unit"> passos</span>
+              </div>
+              <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
+                <button className="btn btn-gold btn-sm" onClick={() => stopPedometer(true)} data-testid="pedometer-stop-save-btn">
+                  Parar e salvar
+                </button>
+                <button className="btn btn-ghost btn-sm" onClick={() => stopPedometer(false)} data-testid="pedometer-stop-discard-btn">
+                  Cancelar
+                </button>
+              </div>
             </div>
           )}
         </div>
