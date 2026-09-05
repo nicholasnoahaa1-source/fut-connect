@@ -297,6 +297,10 @@ class HealthGoalsPayload(BaseModel):
     km: Optional[float] = None
 
 
+class WeightPayload(BaseModel):
+    kg: float
+
+
 # ---------- Auth helpers (email/password) ----------
 def hash_password(pw: str) -> str:
     return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -1080,6 +1084,24 @@ async def log_burned(p: BurnedPayload, user=Depends(get_user_from_session)):
     if p.kcal < 0:
         raise HTTPException(400, "Valor inválido")
     return await add_health_log(user["user_id"], "burned", {"kcal": p.kcal, "source": p.source})
+
+
+@api.post("/health/weight")
+async def log_weight(p: WeightPayload, user=Depends(get_user_from_session)):
+    if p.kg <= 0 or p.kg > 500:
+        raise HTTPException(400, "Valor inválido")
+    return await add_health_log(user["user_id"], "weight", {"kg": p.kg})
+
+
+@api.get("/health/weight/history")
+async def weight_history(days: int = 30, user=Depends(get_user_from_session)):
+    days = max(1, min(days, 365))
+    start_date = (now_utc().date() - timedelta(days=days - 1)).isoformat()
+    logs = await db.health_logs.find(
+        {"user_id": user["user_id"], "type": "weight", "date": {"$gte": start_date}},
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(1000)
+    return {"entries": [{"date": l["date"], "kg": l["kg"]} for l in logs]}
 
 
 @api.post("/health/device-sync")

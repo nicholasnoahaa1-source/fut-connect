@@ -94,16 +94,19 @@ function QuickForm({ testId, placeholder, buttonLabel, onSubmit, type = "number"
 export default function HealthView({ toast }) {
   const [today, setToday] = useState(null);
   const [history, setHistory] = useState([]);
+  const [weightHistory, setWeightHistory] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     try {
-      const [t, h] = await Promise.all([
+      const [t, h, w] = await Promise.all([
         api.get("/health/today"),
         api.get("/health/history?days=7"),
+        api.get("/health/weight/history?days=30"),
       ]);
       setToday(t.data);
       setHistory(h.data.days);
+      setWeightHistory(w.data.entries);
     } catch (e) {
       toast?.("Erro ao carregar dados de saúde");
     }
@@ -118,6 +121,7 @@ export default function HealthView({ toast }) {
   const addBpm = async (bpm) => { await api.post("/health/bpm", { bpm, source: "manual" }); ok("BPM registrado ❤️"); load(); };
   const addActivity = async (km) => { await api.post("/health/activity", { km, source: "manual" }); ok("Caminhada registrada 🚶"); load(); };
   const addBurned = async (kcal) => { await api.post("/health/burned", { kcal, source: "manual" }); ok("Kcal perdida registrada 🔥"); load(); };
+  const addWeight = async (kg) => { await api.post("/health/weight", { kg }); ok("Peso registrado ⚖️"); load(); };
   const addNutrition = async (kcal, protein_g, label) => {
     await api.post("/health/nutrition", { kcal, protein_g, label });
     ok("Refeição registrada 🍽️"); load();
@@ -221,6 +225,10 @@ export default function HealthView({ toast }) {
           <h3>Kcal perdida (manual)</h3>
           <QuickForm testId="form-burned" placeholder="ex: 300" buttonLabel="Registrar" onSubmit={addBurned} />
         </div>
+        <div className="health-card">
+          <h3>Peso (kg)</h3>
+          <QuickForm testId="form-weight" placeholder="ex: 72.5" step="0.1" buttonLabel="Registrar" onSubmit={addWeight} />
+        </div>
         <div className="health-card health-card-wide">
           <h3>Refeição (proteína e kcal)</h3>
           <form className="health-quickform" onSubmit={submitMeal} data-testid="form-nutrition">
@@ -237,6 +245,7 @@ export default function HealthView({ toast }) {
         <ChartCard title="Distância (km)" unit=" km" points={history.map((d) => ({ date: d.date.slice(5), value: d.km }))} />
         <ChartCard title="Kcal (in vs out)" unit=" kcal" points={history.map((d) => ({ date: d.date.slice(5), value: d.kcal_in }))} />
         <ChartCard title="BPM médio" points={history.map((d) => ({ date: d.date.slice(5), value: d.avg_bpm }))} />
+        <ChartCard title="Peso (kg) — 30 dias" unit=" kg" points={weightHistory.map((w) => ({ date: w.date.slice(5), value: w.kg }))} />
       </div>
 
       <div className="health-history">
