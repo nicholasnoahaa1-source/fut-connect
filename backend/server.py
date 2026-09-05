@@ -38,6 +38,10 @@ FITBIT_CLIENT_SECRET = os.environ.get("FITBIT_CLIENT_SECRET", "")
 FITBIT_REDIRECT_URI = os.environ.get("FITBIT_REDIRECT_URI", "")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "")
 
+STRAVA_CLIENT_ID = os.environ.get("STRAVA_CLIENT_ID", "")
+STRAVA_CLIENT_SECRET = os.environ.get("STRAVA_CLIENT_SECRET", "")
+STRAVA_REDIRECT_URI = os.environ.get("STRAVA_REDIRECT_URI", "")
+
 logger = logging.getLogger("futconnect")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -1287,6 +1291,169 @@ async def fitbit_sync(user=Depends(get_user_from_session)):
 
     if not saved:
         return {"synced": [], "message": "Nenhum dado novo do Fitbit para hoje"}
+    return {"synced": saved}
+
+
+# ---------- Strava OAuth2 integration ----------
+STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize"
+STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
+STRAVA_SCOPES = "activity:read_all"
+
+
+def strava_configured() -> bool:
+    return bool(STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET and STRAVA_REDIRECT_URI)
+
+
+async def get_strava_tokens(user_id: str) -> Optional[Dict[str, Any]]:
+    return await db.strava_tokens.find_one({"user_id": user_id}, {"_id": 0})
+
+
+async def strava_refresh_if_needed(tokens: Dict[str, Any]) -> Dict[str, Any]:
+    if tokens["expires_at"] > int(now_utc().timestamp()) + 60:
+        return tokens
+    async with httpx.AsyncClient(timeout=15.0) as cli:
+        resp = await cli.post(
+            STRAVA_TOKEN_URL,
+            data={
+                "client_id": STRAVA_CLIENT_ID,
+                "client_secret": STRAVA_CLIENT_SECRET,
+                "grant_type": "refresh_token",
+                "refresh_token": tokens["refresh_token"],
+            },
+        )
+    if resp.status_code != 200:
+        raise HTTPException(401, "Não foi possível renovar a conexão com o Strava. Reconecte.")
+    data = resp.json()
+    new_tokens = {
+        "user_id": tokens["user_id"],
+        "access_token": data["access_token"],
+        "refresh_token": data["refresh_token"],
+        "expires_at": data["expires_at"],
+        "athlete_id": tokens.get("athlete_id"),
+    }
+    await db.strava_tokens.update_one({"user_id": tokens["user_id"]}, {"$set": new_tokens}, upsert=True)
+    return new_tokens
+
+
+@api.get("/health/strava/status")
+async def strava_status(user=Depends(get_user_from_session)):
+    if not strava_configured():
+        return {"configured": False, "connected": False}
+    tokens = await get_strava_tokens(user["user_id"])
+    return {"configured": True, "connected": tokens is not None}
+
+
+@api.get("/health/strava/connect")
+async def strava_connect(user=Depends(get_user_from_session)):
+    if not strava_configured():
+        raise HTTPException(400, "Integração Strava não configurada no servidor (faltam credenciais)")
+    state = secrets.token_urlsafe(24)
+    await db.oauth_states.insert_one(
+        {"state": state, "user_id": user["user_id"], "provider": "strava", "created_at": now_utc().isoformat()}
+    )
+    params = {
+        "client_id": STRAVA_CLIENT_ID,
+        "redirect_uri": STRAVA_REDIRECT_URI,
+        "response_type": "code",
+        "approval_prompt": "auto",
+        "scope": STRAVA_SCOPES,
+        "state": state,
+    }
+    url = f"{STRAVA_AUTH_URL}?{httpx.QueryParams(params)}"
+    return {"url": url}
+
+
+@api.get("/health/strava/callback")
+async def strava_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    dest = f"{FRONTEND_URL}/dashboard" if FRONTEND_URL else "/dashboard"
+    if error or not code or not state:
+        return JSONResponse(status_code=302, headers={"Location": f"{dest}?strava=error"}, content=None)
+    state_doc = await db.oauth_states.find_one({"state": state, "provider": "strava"}, {"_id": 0})
+    if not state_doc:
+        return JSONResponse(status_code=302, headers={"Location": f"{dest}?strava=error"}, content=None)
+    await db.oauth_states.delete_one({"state": state})
+    user_id = state_doc["user_id"]
+
+    async with httpx.AsyncClient(timeout=15.0) as cli:
+        resp = await cli.post(
+            STRAVA_TOKEN_URL,
+            data={
+                "client_id": STRAVA_CLIENT_ID,
+                "client_secret": STRAVA_CLIENT_SECRET,
+                "code": code,
+                "grant_type": "authorization_code",
+            },
+        )
+    if resp.status_code != 200:
+        logger.error("Strava token exchange failed: %s", resp.text)
+        return JSONResponse(status_code=302, headers={"Location": f"{dest}?strava=error"}, content=None)
+
+    data = resp.json()
+    await db.strava_tokens.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "user_id": user_id,
+                "access_token": data["access_token"],
+                "refresh_token": data["refresh_token"],
+                "expires_at": data["expires_at"],
+                "athlete_id": data.get("athlete", {}).get("id"),
+            }
+        },
+        upsert=True,
+    )
+    return JSONResponse(status_code=302, headers={"Location": f"{dest}?strava=connected"}, content=None)
+
+
+@api.post("/health/strava/disconnect")
+async def strava_disconnect(user=Depends(get_user_from_session)):
+    await db.strava_tokens.delete_one({"user_id": user["user_id"]})
+    return {"ok": True}
+
+
+@api.post("/health/strava/sync")
+async def strava_sync(user=Depends(get_user_from_session)):
+    tokens = await get_strava_tokens(user["user_id"])
+    if not tokens:
+        raise HTTPException(400, "Strava não conectado")
+    tokens = await strava_refresh_if_needed(tokens)
+
+    start_of_day = datetime.combine(now_utc().date(), datetime.min.time(), tzinfo=timezone.utc)
+    after_ts = int(start_of_day.timestamp())
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    async with httpx.AsyncClient(timeout=15.0) as cli:
+        resp = await cli.get(
+            "https://www.strava.com/api/v3/athlete/activities",
+            headers=headers,
+            params={"after": after_ts, "per_page": 30},
+        )
+    if resp.status_code == 401:
+        raise HTTPException(401, "Sessão do Strava expirada. Reconecte.")
+    if resp.status_code != 200:
+        raise HTTPException(502, "Erro ao consultar atividades no Strava")
+
+    activities = resp.json()
+    saved = []
+    total_km = 0.0
+    kcal_total = 0.0
+    bpm_readings = []
+    for act in activities:
+        total_km += (act.get("distance") or 0) / 1000.0
+        if act.get("calories"):
+            kcal_total += act["calories"]
+        if act.get("average_heartrate"):
+            bpm_readings.append(act["average_heartrate"])
+
+    if total_km > 0:
+        saved.append(await add_health_log(user["user_id"], "activity", {"km": round(total_km, 2), "steps": None, "source": "strava"}))
+    if kcal_total > 0:
+        saved.append(await add_health_log(user["user_id"], "burned", {"kcal": round(kcal_total, 1), "source": "strava"}))
+    if bpm_readings:
+        avg_bpm = round(sum(bpm_readings) / len(bpm_readings))
+        saved.append(await add_health_log(user["user_id"], "bpm", {"bpm": avg_bpm, "source": "strava"}))
+
+    if not saved:
+        return {"synced": [], "message": "Nenhuma atividade do Strava encontrada hoje"}
     return {"synced": saved}
 
 

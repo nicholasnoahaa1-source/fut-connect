@@ -97,20 +97,24 @@ export default function HealthView({ toast }) {
   const [weightHistory, setWeightHistory] = useState([]);
   const [fitbit, setFitbit] = useState({ configured: false, connected: false });
   const [fitbitBusy, setFitbitBusy] = useState(false);
+  const [strava, setStrava] = useState({ configured: false, connected: false });
+  const [stravaBusy, setStravaBusy] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     try {
-      const [t, h, w, f] = await Promise.all([
+      const [t, h, w, f, s] = await Promise.all([
         api.get("/health/today"),
         api.get("/health/history?days=7"),
         api.get("/health/weight/history?days=30"),
         api.get("/health/fitbit/status"),
+        api.get("/health/strava/status"),
       ]);
       setToday(t.data);
       setHistory(h.data.days);
       setWeightHistory(w.data.entries);
       setFitbit(f.data);
+      setStrava(s.data);
     } catch (e) {
       toast?.("Erro ao carregar dados de saúde");
     }
@@ -121,11 +125,15 @@ export default function HealthView({ toast }) {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const status = params.get("fitbit");
-    if (!status) return;
-    if (status === "connected") toast?.("Fitbit conectado! 🎉");
-    if (status === "error") toast?.("Não foi possível conectar ao Fitbit");
+    const fitbitStatus = params.get("fitbit");
+    const stravaStatus = params.get("strava");
+    if (!fitbitStatus && !stravaStatus) return;
+    if (fitbitStatus === "connected") toast?.("Fitbit conectado! 🎉");
+    if (fitbitStatus === "error") toast?.("Não foi possível conectar ao Fitbit");
+    if (stravaStatus === "connected") toast?.("Strava conectado! 🎉");
+    if (stravaStatus === "error") toast?.("Não foi possível conectar ao Strava");
     params.delete("fitbit");
+    params.delete("strava");
     const q = params.toString();
     window.history.replaceState({}, "", window.location.pathname + (q ? `?${q}` : ""));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -179,6 +187,33 @@ export default function HealthView({ toast }) {
     load();
   };
 
+  const connectStrava = async () => {
+    try {
+      const { data } = await api.get("/health/strava/connect");
+      window.location.href = data.url;
+    } catch (e) {
+      ok(e.response?.data?.detail || "Erro ao iniciar conexão com Strava");
+    }
+  };
+
+  const syncStrava = async () => {
+    setStravaBusy(true);
+    try {
+      const { data } = await api.post("/health/strava/sync");
+      ok(data.synced?.length ? "Strava sincronizado 🏃" : (data.message || "Nada novo do Strava"));
+      load();
+    } catch (e) {
+      ok(e.response?.data?.detail || "Erro ao sincronizar com o Strava");
+    }
+    setStravaBusy(false);
+  };
+
+  const disconnectStrava = async () => {
+    await api.post("/health/strava/disconnect");
+    ok("Strava desconectado");
+    load();
+  };
+
   const [mealKcal, setMealKcal] = useState("");
   const [mealProtein, setMealProtein] = useState("");
   const [mealLabel, setMealLabel] = useState("");
@@ -226,29 +261,56 @@ export default function HealthView({ toast }) {
         </div>
       </div>
 
-      <div className="health-card" data-testid="fitbit-card" style={{ marginBottom: "1.2rem" }}>
-        <h3>⌚ Fitbit</h3>
-        {!fitbit.configured && (
-          <p style={{ color: "var(--text-dim)", fontSize: ".85rem" }}>
-            Integração ainda não configurada no servidor (faltam credenciais do Fitbit).
-          </p>
-        )}
-        {fitbit.configured && !fitbit.connected && (
-          <button className="btn btn-primary btn-sm" onClick={connectFitbit} data-testid="fitbit-connect-btn">
-            Conectar minha conta Fitbit
-          </button>
-        )}
-        {fitbit.configured && fitbit.connected && (
-          <div style={{ display: "flex", gap: ".5rem", alignItems: "center", flexWrap: "wrap" }}>
-            <span style={{ color: "var(--gold)", fontSize: ".85rem" }}>✓ Conectado</span>
-            <button className="btn btn-gold btn-sm" onClick={syncFitbit} disabled={fitbitBusy} data-testid="fitbit-sync-btn">
-              {fitbitBusy ? "Sincronizando…" : "Sincronizar agora"}
+      <div className="health-forms" style={{ marginBottom: "1.2rem" }}>
+        <div className="health-card" data-testid="fitbit-card">
+          <h3>⌚ Fitbit</h3>
+          {!fitbit.configured && (
+            <p style={{ color: "var(--text-dim)", fontSize: ".85rem" }}>
+              Integração ainda não configurada no servidor (faltam credenciais do Fitbit).
+            </p>
+          )}
+          {fitbit.configured && !fitbit.connected && (
+            <button className="btn btn-primary btn-sm" onClick={connectFitbit} data-testid="fitbit-connect-btn">
+              Conectar minha conta Fitbit
             </button>
-            <button className="btn btn-ghost btn-sm" onClick={disconnectFitbit} data-testid="fitbit-disconnect-btn">
-              Desconectar
+          )}
+          {fitbit.configured && fitbit.connected && (
+            <div style={{ display: "flex", gap: ".5rem", alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ color: "var(--gold)", fontSize: ".85rem" }}>✓ Conectado</span>
+              <button className="btn btn-gold btn-sm" onClick={syncFitbit} disabled={fitbitBusy} data-testid="fitbit-sync-btn">
+                {fitbitBusy ? "Sincronizando…" : "Sincronizar agora"}
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={disconnectFitbit} data-testid="fitbit-disconnect-btn">
+                Desconectar
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="health-card" data-testid="strava-card">
+          <h3>🏃 Strava</h3>
+          {!strava.configured && (
+            <p style={{ color: "var(--text-dim)", fontSize: ".85rem" }}>
+              Integração ainda não configurada no servidor (faltam credenciais do Strava).
+            </p>
+          )}
+          {strava.configured && !strava.connected && (
+            <button className="btn btn-primary btn-sm" onClick={connectStrava} data-testid="strava-connect-btn">
+              Conectar minha conta Strava
             </button>
-          </div>
-        )}
+          )}
+          {strava.configured && strava.connected && (
+            <div style={{ display: "flex", gap: ".5rem", alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ color: "var(--gold)", fontSize: ".85rem" }}>✓ Conectado</span>
+              <button className="btn btn-gold btn-sm" onClick={syncStrava} disabled={stravaBusy} data-testid="strava-sync-btn">
+                {stravaBusy ? "Sincronizando…" : "Sincronizar agora"}
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={disconnectStrava} data-testid="strava-disconnect-btn">
+                Desconectar
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {editingGoals && goalForm && (
