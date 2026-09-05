@@ -33,6 +33,15 @@ mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
+FITBIT_CLIENT_ID = os.environ.get("FITBIT_CLIENT_ID", "")
+FITBIT_CLIENT_SECRET = os.environ.get("FITBIT_CLIENT_SECRET", "")
+FITBIT_REDIRECT_URI = os.environ.get("FITBIT_REDIRECT_URI", "")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "")
+
+STRAVA_CLIENT_ID = os.environ.get("STRAVA_CLIENT_ID", "")
+STRAVA_CLIENT_SECRET = os.environ.get("STRAVA_CLIENT_SECRET", "")
+STRAVA_REDIRECT_URI = os.environ.get("STRAVA_REDIRECT_URI", "")
+
 logger = logging.getLogger("futconnect")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -254,6 +263,56 @@ class AIRecommendPayload(BaseModel):
 
 class AIAnalyzePayload(BaseModel):
     focus: Optional[str] = None  # ex: "atacante explosivo"
+
+
+class WaterPayload(BaseModel):
+    liters: float
+
+
+class BpmPayload(BaseModel):
+    bpm: int
+    source: Optional[str] = "manual"  # "manual" | "device"
+
+
+class ActivityPayload(BaseModel):
+    km: float
+    steps: Optional[int] = None
+    source: Optional[str] = "manual"
+
+
+class NutritionPayload(BaseModel):
+    label: Optional[str] = None
+    protein_g: float = 0
+    kcal: float = 0
+
+
+class BurnedPayload(BaseModel):
+    kcal: float
+    source: Optional[str] = "manual"
+
+
+class DeviceSyncPayload(BaseModel):
+    bpm: Optional[int] = None
+    kcal_burned: Optional[float] = None
+    km: Optional[float] = None
+    steps: Optional[int] = None
+    device_name: Optional[str] = "Smartwatch"
+
+
+class HealthGoalsPayload(BaseModel):
+    water_l: Optional[float] = None
+    kcal_in: Optional[float] = None
+    protein_g: Optional[float] = None
+    km: Optional[float] = None
+
+
+class WeightPayload(BaseModel):
+    kg: float
+
+
+class SleepPayload(BaseModel):
+    hours: float
+    quality: Optional[str] = None  # "ruim" | "ok" | "boa" | "otima"
 
 
 # ---------- Auth helpers (email/password) ----------
@@ -983,6 +1042,561 @@ async def ai_recommend(p: AIRecommendPayload, user=Depends(get_user_from_session
         prompt,
     )
     return {"recommendation": text, "candidates": top}
+
+
+# ---------- Health tracking ----------
+def today_str() -> str:
+    return now_utc().date().isoformat()
+
+
+async def add_health_log(user_id: str, log_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    doc = {
+        "id": gen_id("hlog"),
+        "user_id": user_id,
+        "type": log_type,
+        "date": today_str(),
+        "created_at": now_utc().isoformat(),
+        **data,
+    }
+    await db.health_logs.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.post("/health/water")
+async def log_water(p: WaterPayload, user=Depends(get_user_from_session)):
+    if p.liters <= 0:
+        raise HTTPException(400, "Valor inválido")
+    return await add_health_log(user["user_id"], "water", {"liters": p.liters})
+
+
+@api.post("/health/bpm")
+async def log_bpm(p: BpmPayload, user=Depends(get_user_from_session)):
+    if p.bpm <= 0 or p.bpm > 300:
+        raise HTTPException(400, "BPM inválido")
+    return await add_health_log(user["user_id"], "bpm", {"bpm": p.bpm, "source": p.source})
+
+
+@api.post("/health/activity")
+async def log_activity(p: ActivityPayload, user=Depends(get_user_from_session)):
+    if p.km < 0:
+        raise HTTPException(400, "Valor inválido")
+    return await add_health_log(user["user_id"], "activity", {"km": p.km, "steps": p.steps, "source": p.source})
+
+
+@api.post("/health/nutrition")
+async def log_nutrition(p: NutritionPayload, user=Depends(get_user_from_session)):
+    if p.protein_g < 0 or p.kcal < 0:
+        raise HTTPException(400, "Valor inválido")
+    return await add_health_log(
+        user["user_id"], "nutrition", {"label": p.label, "protein_g": p.protein_g, "kcal": p.kcal}
+    )
+
+
+@api.post("/health/burned")
+async def log_burned(p: BurnedPayload, user=Depends(get_user_from_session)):
+    if p.kcal < 0:
+        raise HTTPException(400, "Valor inválido")
+    return await add_health_log(user["user_id"], "burned", {"kcal": p.kcal, "source": p.source})
+
+
+@api.post("/health/weight")
+async def log_weight(p: WeightPayload, user=Depends(get_user_from_session)):
+    if p.kg <= 0 or p.kg > 500:
+        raise HTTPException(400, "Valor inválido")
+    return await add_health_log(user["user_id"], "weight", {"kg": p.kg})
+
+
+@api.get("/health/weight/history")
+async def weight_history(days: int = 30, user=Depends(get_user_from_session)):
+    days = max(1, min(days, 365))
+    start_date = (now_utc().date() - timedelta(days=days - 1)).isoformat()
+    logs = await db.health_logs.find(
+        {"user_id": user["user_id"], "type": "weight", "date": {"$gte": start_date}},
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(1000)
+    return {"entries": [{"date": l["date"], "kg": l["kg"]} for l in logs]}
+
+
+@api.post("/health/sleep")
+async def log_sleep(p: SleepPayload, user=Depends(get_user_from_session)):
+    if p.hours < 0 or p.hours > 24:
+        raise HTTPException(400, "Valor inválido")
+    return await add_health_log(user["user_id"], "sleep", {"hours": p.hours, "quality": p.quality})
+
+
+@api.get("/health/sleep/history")
+async def sleep_history(days: int = 30, user=Depends(get_user_from_session)):
+    days = max(1, min(days, 365))
+    start_date = (now_utc().date() - timedelta(days=days - 1)).isoformat()
+    logs = await db.health_logs.find(
+        {"user_id": user["user_id"], "type": "sleep", "date": {"$gte": start_date}},
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(1000)
+    return {"entries": [{"date": l["date"], "hours": l["hours"], "quality": l.get("quality")} for l in logs]}
+
+
+@api.post("/health/device-sync")
+async def device_sync(p: DeviceSyncPayload, user=Depends(get_user_from_session)):
+    """Simula a conexão com um relógio/smartband: recebe leituras e registra como logs com source=device."""
+    saved = []
+    if p.bpm is not None:
+        saved.append(await add_health_log(user["user_id"], "bpm", {"bpm": p.bpm, "source": "device", "device": p.device_name}))
+    if p.kcal_burned is not None:
+        saved.append(await add_health_log(user["user_id"], "burned", {"kcal": p.kcal_burned, "source": "device", "device": p.device_name}))
+    if p.km is not None:
+        saved.append(await add_health_log(user["user_id"], "activity", {"km": p.km, "steps": p.steps, "source": "device", "device": p.device_name}))
+    if not saved:
+        raise HTTPException(400, "Nenhuma leitura enviada")
+    return {"synced": saved}
+
+
+# ---------- Fitbit OAuth2 integration ----------
+FITBIT_AUTH_URL = "https://www.fitbit.com/oauth2/authorize"
+FITBIT_TOKEN_URL = "https://api.fitbit.com/oauth2/token"
+FITBIT_SCOPES = "activity heartrate profile"
+
+
+def fitbit_configured() -> bool:
+    return bool(FITBIT_CLIENT_ID and FITBIT_CLIENT_SECRET and FITBIT_REDIRECT_URI)
+
+
+async def get_fitbit_tokens(user_id: str) -> Optional[Dict[str, Any]]:
+    return await db.fitbit_tokens.find_one({"user_id": user_id}, {"_id": 0})
+
+
+async def fitbit_refresh_if_needed(tokens: Dict[str, Any]) -> Dict[str, Any]:
+    expires_at = datetime.fromisoformat(tokens["expires_at"])
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at > now_utc() + timedelta(minutes=1):
+        return tokens
+    auth = base64_basic_auth(FITBIT_CLIENT_ID, FITBIT_CLIENT_SECRET)
+    async with httpx.AsyncClient(timeout=15.0) as cli:
+        resp = await cli.post(
+            FITBIT_TOKEN_URL,
+            headers={"Authorization": f"Basic {auth}", "Content-Type": "application/x-www-form-urlencoded"},
+            data={"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(401, "Não foi possível renovar a conexão com o Fitbit. Reconecte.")
+    data = resp.json()
+    new_tokens = {
+        "user_id": tokens["user_id"],
+        "access_token": data["access_token"],
+        "refresh_token": data.get("refresh_token", tokens["refresh_token"]),
+        "expires_at": (now_utc() + timedelta(seconds=data["expires_in"])).isoformat(),
+        "fitbit_user_id": tokens.get("fitbit_user_id"),
+    }
+    await db.fitbit_tokens.update_one({"user_id": tokens["user_id"]}, {"$set": new_tokens}, upsert=True)
+    return new_tokens
+
+
+def base64_basic_auth(client_id: str, client_secret: str) -> str:
+    import base64
+    return base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+
+
+@api.get("/health/fitbit/status")
+async def fitbit_status(user=Depends(get_user_from_session)):
+    if not fitbit_configured():
+        return {"configured": False, "connected": False}
+    tokens = await get_fitbit_tokens(user["user_id"])
+    return {"configured": True, "connected": tokens is not None}
+
+
+@api.get("/health/fitbit/connect")
+async def fitbit_connect(user=Depends(get_user_from_session)):
+    if not fitbit_configured():
+        raise HTTPException(400, "Integração Fitbit não configurada no servidor (faltam credenciais)")
+    state = secrets.token_urlsafe(24)
+    await db.oauth_states.insert_one(
+        {"state": state, "user_id": user["user_id"], "provider": "fitbit", "created_at": now_utc().isoformat()}
+    )
+    params = {
+        "response_type": "code",
+        "client_id": FITBIT_CLIENT_ID,
+        "redirect_uri": FITBIT_REDIRECT_URI,
+        "scope": FITBIT_SCOPES,
+        "state": state,
+    }
+    url = f"{FITBIT_AUTH_URL}?{httpx.QueryParams(params)}"
+    return {"url": url}
+
+
+@api.get("/health/fitbit/callback")
+async def fitbit_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    dest = f"{FRONTEND_URL}/dashboard" if FRONTEND_URL else "/dashboard"
+    if error or not code or not state:
+        return JSONResponse(status_code=302, headers={"Location": f"{dest}?fitbit=error"}, content=None)
+    state_doc = await db.oauth_states.find_one({"state": state, "provider": "fitbit"}, {"_id": 0})
+    if not state_doc:
+        return JSONResponse(status_code=302, headers={"Location": f"{dest}?fitbit=error"}, content=None)
+    await db.oauth_states.delete_one({"state": state})
+    user_id = state_doc["user_id"]
+
+    auth = base64_basic_auth(FITBIT_CLIENT_ID, FITBIT_CLIENT_SECRET)
+    async with httpx.AsyncClient(timeout=15.0) as cli:
+        resp = await cli.post(
+            FITBIT_TOKEN_URL,
+            headers={"Authorization": f"Basic {auth}", "Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "client_id": FITBIT_CLIENT_ID,
+                "grant_type": "authorization_code",
+                "redirect_uri": FITBIT_REDIRECT_URI,
+                "code": code,
+            },
+        )
+    if resp.status_code != 200:
+        logger.error("Fitbit token exchange failed: %s", resp.text)
+        return JSONResponse(status_code=302, headers={"Location": f"{dest}?fitbit=error"}, content=None)
+
+    data = resp.json()
+    await db.fitbit_tokens.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "user_id": user_id,
+                "access_token": data["access_token"],
+                "refresh_token": data["refresh_token"],
+                "expires_at": (now_utc() + timedelta(seconds=data["expires_in"])).isoformat(),
+                "fitbit_user_id": data.get("user_id"),
+            }
+        },
+        upsert=True,
+    )
+    return JSONResponse(status_code=302, headers={"Location": f"{dest}?fitbit=connected"}, content=None)
+
+
+@api.post("/health/fitbit/disconnect")
+async def fitbit_disconnect(user=Depends(get_user_from_session)):
+    await db.fitbit_tokens.delete_one({"user_id": user["user_id"]})
+    return {"ok": True}
+
+
+@api.post("/health/fitbit/sync")
+async def fitbit_sync(user=Depends(get_user_from_session)):
+    tokens = await get_fitbit_tokens(user["user_id"])
+    if not tokens:
+        raise HTTPException(400, "Fitbit não conectado")
+    tokens = await fitbit_refresh_if_needed(tokens)
+    date = today_str()
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    async with httpx.AsyncClient(timeout=15.0) as cli:
+        activity_resp = await cli.get(f"https://api.fitbit.com/1/user/-/activities/date/{date}.json", headers=headers)
+        heart_resp = await cli.get(f"https://api.fitbit.com/1/user/-/activities/heart/date/{date}/1d.json", headers=headers)
+
+    if activity_resp.status_code == 401 or heart_resp.status_code == 401:
+        raise HTTPException(401, "Sessão do Fitbit expirada. Reconecte.")
+    if activity_resp.status_code != 200:
+        raise HTTPException(502, "Erro ao consultar atividade no Fitbit")
+
+    activity = activity_resp.json().get("summary", {})
+    saved = []
+    kcal_out = activity.get("caloriesOut")
+    if kcal_out is not None:
+        saved.append(await add_health_log(user["user_id"], "burned", {"kcal": float(kcal_out), "source": "fitbit"}))
+    steps = activity.get("steps")
+    distance_km = next(
+        (d["distance"] for d in activity.get("distances", []) if d.get("activity") == "total"), None
+    )
+    if steps is not None or distance_km is not None:
+        saved.append(
+            await add_health_log(
+                user["user_id"], "activity", {"km": float(distance_km or 0), "steps": steps, "source": "fitbit"}
+            )
+        )
+    if heart_resp.status_code == 200:
+        heart = heart_resp.json().get("activities-heart", [])
+        resting_bpm = heart[0].get("value", {}).get("restingHeartRate") if heart else None
+        if resting_bpm is not None:
+            saved.append(await add_health_log(user["user_id"], "bpm", {"bpm": int(resting_bpm), "source": "fitbit"}))
+
+    if not saved:
+        return {"synced": [], "message": "Nenhum dado novo do Fitbit para hoje"}
+    return {"synced": saved}
+
+
+# ---------- Strava OAuth2 integration ----------
+STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize"
+STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
+STRAVA_SCOPES = "activity:read_all"
+
+
+def strava_configured() -> bool:
+    return bool(STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET and STRAVA_REDIRECT_URI)
+
+
+async def get_strava_tokens(user_id: str) -> Optional[Dict[str, Any]]:
+    return await db.strava_tokens.find_one({"user_id": user_id}, {"_id": 0})
+
+
+async def strava_refresh_if_needed(tokens: Dict[str, Any]) -> Dict[str, Any]:
+    if tokens["expires_at"] > int(now_utc().timestamp()) + 60:
+        return tokens
+    async with httpx.AsyncClient(timeout=15.0) as cli:
+        resp = await cli.post(
+            STRAVA_TOKEN_URL,
+            data={
+                "client_id": STRAVA_CLIENT_ID,
+                "client_secret": STRAVA_CLIENT_SECRET,
+                "grant_type": "refresh_token",
+                "refresh_token": tokens["refresh_token"],
+            },
+        )
+    if resp.status_code != 200:
+        raise HTTPException(401, "Não foi possível renovar a conexão com o Strava. Reconecte.")
+    data = resp.json()
+    new_tokens = {
+        "user_id": tokens["user_id"],
+        "access_token": data["access_token"],
+        "refresh_token": data["refresh_token"],
+        "expires_at": data["expires_at"],
+        "athlete_id": tokens.get("athlete_id"),
+    }
+    await db.strava_tokens.update_one({"user_id": tokens["user_id"]}, {"$set": new_tokens}, upsert=True)
+    return new_tokens
+
+
+@api.get("/health/strava/status")
+async def strava_status(user=Depends(get_user_from_session)):
+    if not strava_configured():
+        return {"configured": False, "connected": False}
+    tokens = await get_strava_tokens(user["user_id"])
+    return {"configured": True, "connected": tokens is not None}
+
+
+@api.get("/health/strava/connect")
+async def strava_connect(user=Depends(get_user_from_session)):
+    if not strava_configured():
+        raise HTTPException(400, "Integração Strava não configurada no servidor (faltam credenciais)")
+    state = secrets.token_urlsafe(24)
+    await db.oauth_states.insert_one(
+        {"state": state, "user_id": user["user_id"], "provider": "strava", "created_at": now_utc().isoformat()}
+    )
+    params = {
+        "client_id": STRAVA_CLIENT_ID,
+        "redirect_uri": STRAVA_REDIRECT_URI,
+        "response_type": "code",
+        "approval_prompt": "auto",
+        "scope": STRAVA_SCOPES,
+        "state": state,
+    }
+    url = f"{STRAVA_AUTH_URL}?{httpx.QueryParams(params)}"
+    return {"url": url}
+
+
+@api.get("/health/strava/callback")
+async def strava_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    dest = f"{FRONTEND_URL}/dashboard" if FRONTEND_URL else "/dashboard"
+    if error or not code or not state:
+        return JSONResponse(status_code=302, headers={"Location": f"{dest}?strava=error"}, content=None)
+    state_doc = await db.oauth_states.find_one({"state": state, "provider": "strava"}, {"_id": 0})
+    if not state_doc:
+        return JSONResponse(status_code=302, headers={"Location": f"{dest}?strava=error"}, content=None)
+    await db.oauth_states.delete_one({"state": state})
+    user_id = state_doc["user_id"]
+
+    async with httpx.AsyncClient(timeout=15.0) as cli:
+        resp = await cli.post(
+            STRAVA_TOKEN_URL,
+            data={
+                "client_id": STRAVA_CLIENT_ID,
+                "client_secret": STRAVA_CLIENT_SECRET,
+                "code": code,
+                "grant_type": "authorization_code",
+            },
+        )
+    if resp.status_code != 200:
+        logger.error("Strava token exchange failed: %s", resp.text)
+        return JSONResponse(status_code=302, headers={"Location": f"{dest}?strava=error"}, content=None)
+
+    data = resp.json()
+    await db.strava_tokens.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "user_id": user_id,
+                "access_token": data["access_token"],
+                "refresh_token": data["refresh_token"],
+                "expires_at": data["expires_at"],
+                "athlete_id": data.get("athlete", {}).get("id"),
+            }
+        },
+        upsert=True,
+    )
+    return JSONResponse(status_code=302, headers={"Location": f"{dest}?strava=connected"}, content=None)
+
+
+@api.post("/health/strava/disconnect")
+async def strava_disconnect(user=Depends(get_user_from_session)):
+    await db.strava_tokens.delete_one({"user_id": user["user_id"]})
+    return {"ok": True}
+
+
+@api.post("/health/strava/sync")
+async def strava_sync(user=Depends(get_user_from_session)):
+    tokens = await get_strava_tokens(user["user_id"])
+    if not tokens:
+        raise HTTPException(400, "Strava não conectado")
+    tokens = await strava_refresh_if_needed(tokens)
+
+    start_of_day = datetime.combine(now_utc().date(), datetime.min.time(), tzinfo=timezone.utc)
+    after_ts = int(start_of_day.timestamp())
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    async with httpx.AsyncClient(timeout=15.0) as cli:
+        resp = await cli.get(
+            "https://www.strava.com/api/v3/athlete/activities",
+            headers=headers,
+            params={"after": after_ts, "per_page": 30},
+        )
+    if resp.status_code == 401:
+        raise HTTPException(401, "Sessão do Strava expirada. Reconecte.")
+    if resp.status_code != 200:
+        raise HTTPException(502, "Erro ao consultar atividades no Strava")
+
+    activities = resp.json()
+    saved = []
+    total_km = 0.0
+    kcal_total = 0.0
+    bpm_readings = []
+    for act in activities:
+        total_km += (act.get("distance") or 0) / 1000.0
+        if act.get("calories"):
+            kcal_total += act["calories"]
+        if act.get("average_heartrate"):
+            bpm_readings.append(act["average_heartrate"])
+
+    if total_km > 0:
+        saved.append(await add_health_log(user["user_id"], "activity", {"km": round(total_km, 2), "steps": None, "source": "strava"}))
+    if kcal_total > 0:
+        saved.append(await add_health_log(user["user_id"], "burned", {"kcal": round(kcal_total, 1), "source": "strava"}))
+    if bpm_readings:
+        avg_bpm = round(sum(bpm_readings) / len(bpm_readings))
+        saved.append(await add_health_log(user["user_id"], "bpm", {"bpm": avg_bpm, "source": "strava"}))
+
+    if not saved:
+        return {"synced": [], "message": "Nenhuma atividade do Strava encontrada hoje"}
+    return {"synced": saved}
+
+
+DEFAULT_HEALTH_GOALS = {"water_l": 2.5, "kcal_in": 2000.0, "protein_g": 100.0, "km": 5.0}
+
+
+async def get_health_goals(user_id: str) -> Dict[str, float]:
+    doc = await db.health_goals.find_one({"user_id": user_id}, {"_id": 0})
+    goals = dict(DEFAULT_HEALTH_GOALS)
+    if doc:
+        goals.update({k: v for k, v in doc.items() if k in DEFAULT_HEALTH_GOALS and v is not None})
+    return goals
+
+
+@api.get("/health/goals")
+async def read_health_goals(user=Depends(get_user_from_session)):
+    return await get_health_goals(user["user_id"])
+
+
+@api.put("/health/goals")
+async def update_health_goals(p: HealthGoalsPayload, user=Depends(get_user_from_session)):
+    update = {k: v for k, v in p.model_dump().items() if v is not None}
+    if not update:
+        raise HTTPException(400, "Nenhuma meta enviada")
+    for v in update.values():
+        if v < 0:
+            raise HTTPException(400, "Valor inválido")
+    await db.health_goals.update_one({"user_id": user["user_id"]}, {"$set": update}, upsert=True)
+    return await get_health_goals(user["user_id"])
+
+
+@api.get("/health/today")
+async def health_today(user=Depends(get_user_from_session)):
+    date = today_str()
+    logs = await db.health_logs.find(
+        {"user_id": user["user_id"], "date": date}, {"_id": 0}
+    ).sort("created_at", 1).to_list(2000)
+
+    water_l = sum(l["liters"] for l in logs if l["type"] == "water")
+    km = sum(l["km"] for l in logs if l["type"] == "activity")
+    steps = sum((l.get("steps") or 0) for l in logs if l["type"] == "activity")
+    protein_g = sum(l["protein_g"] for l in logs if l["type"] == "nutrition")
+    kcal_in = sum(l["kcal"] for l in logs if l["type"] == "nutrition")
+    kcal_out = sum(l["kcal"] for l in logs if l["type"] == "burned")
+    bpm_readings = [l["bpm"] for l in logs if l["type"] == "bpm"]
+    last_bpm = bpm_readings[-1] if bpm_readings else None
+    avg_bpm = round(sum(bpm_readings) / len(bpm_readings), 1) if bpm_readings else None
+    sleep_readings = [l for l in logs if l["type"] == "sleep"]
+    last_sleep = sleep_readings[-1] if sleep_readings else None
+    goals = await get_health_goals(user["user_id"])
+
+    return {
+        "date": date,
+        "water_l": round(water_l, 2),
+        "km": round(km, 2),
+        "steps": steps,
+        "protein_g": round(protein_g, 1),
+        "kcal_in": round(kcal_in, 1),
+        "kcal_out": round(kcal_out, 1),
+        "last_bpm": last_bpm,
+        "avg_bpm": avg_bpm,
+        "bpm_count": len(bpm_readings),
+        "sleep_hours": last_sleep["hours"] if last_sleep else None,
+        "sleep_quality": last_sleep.get("quality") if last_sleep else None,
+        "goals": goals,
+        "logs": list(reversed(logs))[:50],
+    }
+
+
+@api.get("/health/history")
+async def health_history(days: int = 7, user=Depends(get_user_from_session)):
+    days = max(1, min(days, 30))
+    start_date = (now_utc().date() - timedelta(days=days - 1)).isoformat()
+    logs = await db.health_logs.find(
+        {"user_id": user["user_id"], "date": {"$gte": start_date}}, {"_id": 0}
+    ).to_list(5000)
+
+    by_day: Dict[str, Dict[str, Any]] = {}
+    for i in range(days):
+        d = (now_utc().date() - timedelta(days=days - 1 - i)).isoformat()
+        by_day[d] = {"date": d, "water_l": 0.0, "km": 0.0, "protein_g": 0.0, "kcal_in": 0.0, "kcal_out": 0.0, "bpm_sum": 0, "bpm_n": 0}
+
+    for l in logs:
+        d = by_day.get(l["date"])
+        if not d:
+            continue
+        if l["type"] == "water":
+            d["water_l"] += l["liters"]
+        elif l["type"] == "activity":
+            d["km"] += l["km"]
+        elif l["type"] == "nutrition":
+            d["protein_g"] += l["protein_g"]
+            d["kcal_in"] += l["kcal"]
+        elif l["type"] == "burned":
+            d["kcal_out"] += l["kcal"]
+        elif l["type"] == "bpm":
+            d["bpm_sum"] += l["bpm"]
+            d["bpm_n"] += 1
+
+    result = []
+    for d in by_day.values():
+        avg_bpm = round(d["bpm_sum"] / d["bpm_n"], 1) if d["bpm_n"] else None
+        result.append({
+            "date": d["date"],
+            "water_l": round(d["water_l"], 2),
+            "km": round(d["km"], 2),
+            "protein_g": round(d["protein_g"], 1),
+            "kcal_in": round(d["kcal_in"], 1),
+            "kcal_out": round(d["kcal_out"], 1),
+            "avg_bpm": avg_bpm,
+        })
+    return {"days": result}
+
+
+@api.delete("/health/logs/{log_id}")
+async def delete_health_log(log_id: str, user=Depends(get_user_from_session)):
+    res = await db.health_logs.delete_one({"id": log_id, "user_id": user["user_id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Registro não encontrado")
+    return {"ok": True}
 
 
 # ---------- Mount ----------
